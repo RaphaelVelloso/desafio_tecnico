@@ -1,3 +1,4 @@
+```mermaid
 flowchart TD
     A["Entrada de Eventos do Stream<br/>(sensores_iot.json)"] --> B["1. Definição do Watermark<br/>(ex: Tolerância de 2 Horas)"]
     
