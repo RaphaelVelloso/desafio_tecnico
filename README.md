@@ -45,3 +45,24 @@
    [Diagrama controle cadastro fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_cadastro_fornecedor.markdown)
 
    [Codigo para cadastro de fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/cadastro_fornecedores.py)
+
+   ## 4. Estratégia de Deduplicação de Dados Fora de Ordem
+
+   ### Structured Streaming com Watermarking
+
+   A estratégia ideal em Spark/Databricks para resolver este problema em tempo real (ou em micro-batches contínuos) baseia-se na combinação de dois conceitos: Watermarking e Deduplicação de Estado (Stateful Deduplication).
+
+   [Diagrama watermark](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_iot.md)
+
+   ### Como Funciona a Mecânica Interna:
+1. Janela de Watermark (Tolerância ao Atraso):
+    O Watermark estabelece o limite de tempo que o engine do Spark aceita esperar por dados atrasados em relação ao maior timestamp visto até ao momento.
+    Exemplo: Com .withWatermark("timestamp", "2 hours"), se o Spark já processou um evento de 14:00, eventos com timestamp anterior a 12:00 serão descartados se chegarem depois.
+
+2. Gerenciamento de Estado (RocksDB/State Store):
+    O Spark mantém um registo temporário das chaves únicas de dedup (sensor_id + timestamp) na memória/disco do executor. Quando um evento duplicado chega dentro da janela de 2 horas, o Spark compara-o com o estado e descarta-o.
+
+3. Limpeza Automática de Estado (Garbage Collection):
+    Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
+
+
