@@ -1,5 +1,4 @@
-```
-   mermaid
+```mermaid
 flowchart TD
     A["1. Lê fornecedores do RAW<br/>(csv / landing path)"] --> B["2. Calcula HASH SHA-256<br/>dos atributos (endereço, status, dados bancários)"]
     B --> C{"3. A tabela Silver<br/>já existe?"}
