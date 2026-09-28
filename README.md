@@ -2,7 +2,7 @@
 
 # Projeto NioMetal S.A. - Desafio Técnico
 
-## Parte 1 - Arquitetura Medallion — Plataforma NioMetal S.A.
+## Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
 | Camada | Fonte / Dataset | SLA / Frequência | Estratégia de Ingestão | Formato & Particionamento | Tratamento & Schema Evolution | Governança (Unity Catalog) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -65,4 +65,16 @@
 3. Limpeza Automática de Estado (Garbage Collection):
     Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
 
+    [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/sensores_iot.py)
 
+
+    # Parte 3 — SQL avançado
+
+    ## 1. Moinhos com Maior Queda Percentual de Produção Mês a Mês (Últimos 6 Meses)
+    Esta consulta calcula a produção consolidada por mês/moinho, busca o valor do mês anterior através da função de janela LAG(), calcula a variação percentual e identifica os 3 moinhos com a maior queda percentual no período.
+
+    ## 2. Detecção de Anomalias de Produção (Média Móvel e Desvio Padrão de 7 Dias)
+    Esta consulta analisa a série temporal diária por moinho e calcula a média móvel e o desvio padrão dos últimos 7 dias (sem incluir o próprio dia do evento, evitando contaminação do cálculo pelo pico de anomalia).
+
+    ## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
+    Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
