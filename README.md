@@ -14,6 +14,8 @@
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
+<a href="https://exemplo.com" target="_blank">Abrir link</a>
+
 | Camada | Fonte / Dataset | SLA / Frequência | Estratégia de Ingestão | Formato & Particionamento | Tratamento & Schema Evolution | Governança (Unity Catalog) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Bronze** (Raw) | `sensores_iot.json` | Near Real-Time | Streaming via Auto Loader (`cloudFiles`) | Delta Lake<br/>*Sem particionamento* | Ingestão append-only dos JSONs brutos com `schemaEvolutionMode = "addNewColumns"`. | `datascience_catalog` (Read)<br/>`operacoes_catalog` (Read) |
