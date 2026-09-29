@@ -112,7 +112,7 @@
    * Verificar se o Spark tentou realizar o Broadcast Join com uma tabela que ficou grande demais, forçando troca para SortMergeJoin ou causando Driver Out-Of-Memory (OOM)
 
 ## 5. Hipoteses para a degradação
-### 5.1 Falha no Broadcast Join
+### 5.1. Falha no Broadcast Join
 
    * O enunciado menciona que a tabela cadastro_fornecedores cresceu bastante.
 
@@ -120,7 +120,7 @@
 
    * Se o otimizador (ou o código) continuou forçando o broadcast() de uma tabela que ficou gigante, a tabela inteira foi enviada do Driver para todos os Executors, causando uso excessivo de memória, picos brutais de GC e gravação excessiva em disco.
 
-### 5.2 Data Skew nas Transformações Wide
+### 5.2. Data Skew nas Transformações Wide
 
    * Raciocínio: O dataset de sensores costuma crescer de forma desigual (ex.: um sensor com defeito enviando milhões de eventos, ou concentração de eventos em um único timestamp ou fornecedor_id).
 
@@ -130,41 +130,127 @@
 
 ## 6. Otimizações Concretas e Ações de Mitigação
 
-### 6.1 Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+### 6.1. Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
 
    * Converter arquivos raw para Delta/Parquet: Se o sensores_iot.json é lido em formato texto cru, usar o Auto Loader (cloudFiles) para ingerir em Delta Lake com suporte a file notification.
 
    * Compactação de arquivos pequenos (Small Files Problem): Executar um OPTIMIZE na tabela de fornecedores para juntar múltiplos arquivos pequenos em arquivos maiores de 1GB, reduzindo as chamadas de API ao storage.
 
-### 6.2 Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+### 6.2. Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
 
    * Reduzir o uso da Heap para cache: Reajustar a fração de memória usada para execução e armazenamento via spark.memory.fraction ou evitar usar .cache() em grandes conjuntos de dados desnecessariamente
 
-### 6.3 Problema: Data Skew 
+### 6.3. Problema: Data Skew 
 
    * Mitigação Automática com AQE Skew Join: Habilitar o tratamento automático de assimetria do Spark:
 
       Exemplos de configurações:
-      * Habilita a execução adaptativa de consultas
+      * Habilita a execução adaptativa de consultas:
          spark.conf.set("spark.sql.adaptive.enabled", "true")
 
-      * Converte dinamicamente SortMergeJoin em BroadcastJoin se a tabela filtrada for pequena
+      * Converte dinamicamente SortMergeJoin em BroadcastJoin se a tabela filtrada for pequena:
          spark.conf.set("spark.sql.adaptive.autoBroadcastJoinThreshold.enabled", "true")
 
-      * Trata DATA SKEW automaticamente dividindo partições grandes em sub-partições
+      * Trata DATA SKEW automaticamente dividindo partições grandes em sub-partições:
          spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
          spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
          spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256MB")
 
-      * Consolida partições pequenas de Shuffle automaticamente
+      * Consolida partições pequenas de Shuffle automaticamente:
          spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
 
    * Técnica Manual de Salting: Se a chave do groupBy ou join estiver muito concentrada (ex.: um único sensor_id tem 80% das leituras), acrescente uma coluna de "sal" aleatório para quebrar o dado em múltiplas partições antes da operação wide.
 
-### 6.4 Estratégia de Particionamento, Reparticionamento e Caching
+### 6.4. Estratégia de Particionamento, Reparticionamento e Caching
 
    * Evitar repartition() desnecessário: Se o pipeline faz repartition() sem necessidade antes das transformações wide, substitua por coalesce() quando apenas reduzir partições.
 
    * Ajuste de Partições de Shuffle (spark.sql.shuffle.partitions): O valor padrão (200) pode ser pequeno para o novo volume. Com AQE habilitado, pode-se definir um número inicial maior (ex.: 800), e o Spark reduzirá automaticamente se necessário.
 
    * Uso consciente de Caching: Se a tabela cadastro_fornecedores ou o dataset intermediário de sensores for reutilizado múltiplas vezes no mesmo DAG, faça o .persist(StorageLevel.MEMORY_AND_DISK) e lembre-se de dar .unpersist() ao final do job.
+
+---
+
+# Parte 5 — Integração e nuvem
+
+## 1. Autenticação e Gestão de Segredos
+
+Para garantir segurança total e conformidade com boas práticas de DevSecOps, nenhuma credencial ou chave privada fica salva no código ou em variáveis de ambiente abertas
+
+* Gestão de Segredos (AWS Secrets Manager / Azure Key Vault):
+
+   * As chaves SSH , senhas SFTP, Tokens Bearer ou Client IDs/Secrets da API REST são armazenados no AWS Secrets Manager ou Azure Key Vault.
+
+   * A rotação de chaves/tokens pode ser configurada de forma automática no próprio serviço de segredos.
+
+* Acesso por Identity Federation (IAM Roles / Managed Identities):
+
+   * O código do job de ingestão não possui usuários ou senhas de nuvem.
+
+   * O serviço assume uma IAM Role com políticas de Princípio do Menor Privilégio.
+
+   * Em tempo de execução, a função consulta o Secrets Manager via SDK oficial usando a permissão concedida pela IAM Role.
+
+## 2. Estratégia de Retry e Idempotência
+
+Falhas de rede ou interrupções parciais de download não podem corromper o ambiente nem gerar duplicidades.
+
+### 2.1. Mecanismo de Retry
+
+   * Backoff Exponencial com Jitter: Se a conexão SFTP/REST falhar ou o servidor de origem estiver indisponível, a execução realiza até 3 a 5 tentativas, aumentando progressivamente o tempo de espera (ex.: 1min, 4min, 16min) com uma variação aleatória (jitter) para evitar sobrecarregar o servidor remoto.
+
+   * Dead Letter Queue (DLQ): Caso todas as tentativas falhem, a mensagem do job é enviada para uma fila de falhas para análise sem travar os próximos agendamentos.
+
+### 2.2. Idempotência e Tratamento de Falhas Parciais
+
+   * Aterrissagem Atomicamente Particionada (S3 Raw):
+      * O arquivo baixado é salvo no S3 em um caminho contendo a data lógica da carga: s3://bucket-raw/fornecedor_x/ano=YYYY/mes=MM/dia=DD/nome_arquivo_YYYYMMDD.csv.
+   
+      * Se o download falhar no meio, um arquivo temporário (.tmp) é gravado. O pipeline garante que o arquivo só é renomeado para o nome definitivo após a conclusão do download com validação de MD5 Hash / Checksum.
+   
+   * Gravação Idempotente no Delta Lake (Carga Silver):
+      * No consumo da camada Raw para a Silver, utiliza-se o mecanismo de MERGE INTO no Delta Lake ou a gravação particionada com mode("overwrite") restrita à partição da data do arquivo (replaceWhere = "data_ingestao = 'YYYY-MM-DD'").
+      
+      * Reprocessar o mesmo arquivo N vezes gera rigorosamente o mesmo resultado final na tabela, sem duplicar registros.
+
+### 2.3. Observabilidade e Alertas Automáticos
+
+O monitoramento passivo garante que o time de dados seja notificado proativamente sobre falhas ou atrasos na entrega.
+
+   * Detecção de Falha de Ingestão (Failure Alerts):
+
+      * Logs estruturados em formato JSON são enviados ao Amazon CloudWatch Logs / Azure Monitor.
+
+      * Se o código disparar uma exceção não tratada, um alarme no CloudWatch dispara imediatamente uma notificação via Amazon SNS integrada ao Slack / Microsoft Teams ou e-mail de plantão.
+   
+   * Detecção de Atraso
+
+      * Para arquivos que devem chegar até um determinado horário (ex.: 07:00 AM):
+
+      * É configurado uma CloudWatch Metric Math / EventBridge Scheduled Rule que roda às 07:15 AM.
+
+      * A regra verifica se existe um novo arquivo no prefixo S3 do dia atual. Caso a contagem de arquivos seja 0, dispara-se um alerta de "Violação de SLA — Arquivo do Fornecedor Não Entregue".
+
+### 2.4. Controle e Otimização de Custos
+
+Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou finais de semana:
+
+   * Arquitetura Serverless para Ingestão (Zero Idle Cost):
+
+      * Usa-se AWS Lambda (para arquivos pequenos/médios até 10 GB) ou AWS Fargate (para arquivos maiores) acionados via agendamento do Amazon EventBridge.
+
+      * Se o arquivo não existir no servidor SFTP/REST, o script encerra a execução em poucos segundos, gerando um custo residual próximo de zero (centavos de dólar/mês).
+   
+   * Ingestão Orientada a Eventos no Lakehouse (Databricks Auto Loader / AWS Glue Streaming):
+
+      * Em vez de manter clusters Spark rodando continuamente à espera do arquivo, o upload no S3 gera um S3 Event Notification (SQS).
+
+      * O job do Databricks/Glue é acionado somente após a confirmação de escrita no S3 usando a opção Trigger.AvailableNow (ou Trigger.Once). O cluster do Spark liga, processa o arquivo, escreve na Silver e desliga imediatamente (Auto-termination em 10-15 min).
+
+   * Política de Lifecycle no S3 Raw:
+
+      * Configuração de regras de S3 Lifecycle para mover os arquivos da landing zone (raw/) para o S3 Glacier Flexible Retrieval após 30 dias e deletá-los após 1 ano, reduzindo significativamente o custo de armazenamento de longo prazo.
+
+---
+
+# Parte 6 — Uso crítico de ferramentas de IA
