@@ -10,7 +10,7 @@
 - [Parte 4 — Troubleshooting e Performance](#parte-4--troubleshooting-e-performance)
 - [Parte 5 — Integração e nuvem](#parte-5--integração-e-nuvem)
 - [Parte 6 — Uso Crítico de Ferramentas de IA](#parte-6--uso-crítico-de-ferramentas-de-ia)
-- [Documentação](#documentação)
+- [Referências](#referências)
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
@@ -493,6 +493,8 @@ No `lastProgress` do stream, acompanhe `stateOperators[0].numRowsTotal` (o estad
 - Linhas sem `sensor_id` ou sem timestamp permanecem no Bronze e não chegam à Silver. Em produção, devem gerar métrica e alerta.
 - A reconciliação e o stream escrevem na mesma tabela; conflitos de concorrência são esperados e tratados com nova tentativa.
 
+<small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 3 — SQL Avançado
@@ -649,7 +651,7 @@ Sem mudança de código, só três coisas podem ter mudado. Isso organiza toda a
 
 ---
 
-# 1. Diagnóstico: passos em ordem
+## 1. Diagnóstico: passos em ordem
 
 A ordem vai do **barato e amplo** ao **caro e específico**: cada passo descarta hipóteses e diz onde olhar no seguinte.
 
@@ -877,6 +879,8 @@ A causa de fundo de "o job piora sempre que os dados crescem" é que ele **repro
 - **Teste de plano** no CI: verificar que o `explain` do job contém `BroadcastHashJoin` após a redução da dimensão, para detectar quando o join volta a mudar de estratégia.
 - **Checagem de skew** nos dados de entrada (percentual da chave mais frequente) com alerta acima de um limiar.
 
+<small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 5 — Integração e nuvem
@@ -1000,30 +1004,96 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 
 ---
 
-# Documentação
+# Referências
 
-## Apache Spark & Databricks Architecture
+## Parte 1 — Arquitetura Medallion
 
-   * [Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)
-   * [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html)
-   * [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe)
-   * [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader)
-   * [Delta Lake](https://docs.databricks.com/aws/en/delta)
-   * [Optimize data](https://docs.databricks.com/aws/en/tables/operations/optimize)
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Use liquid clustering for tables](https://docs.databricks.com/aws/en/delta/clustering) | Escolha de Liquid Clustering no lugar de partição e `ZORDER`. A documentação informa que o clustering **não é compatível** com particionamento nem com `ZORDER` na mesma tabela e que as chaves podem ser redefinidas sem reescrever os dados. |
+| [Predictive optimization](https://docs.databricks.com/aws/optimizations/predictive-optimization) | Manutenção automática (`OPTIMIZE`, `VACUUM`, `ANALYZE`) de tabelas gerenciadas do Unity Catalog. A disponibilidade depende da conta, do plano e da região. |
+| [Optimize data file layout](https://docs.databricks.com/aws/en/tables/operations/optimize) **(lista original)** | Compactação e agrupamento por chaves de clustering. Leitores usam isolamento por snapshot enquanto o `OPTIMIZE` roda. |
+| [Configure schema inference and evolution in Auto Loader](https://docs.databricks.com/en/ingestion/auto-loader/schema.html) | Tratamento da mudança `planta_id` → `id_planta`: no modo `addNewColumns` o stream falha uma vez ao detectar a coluna nova (`UnknownFieldException`) e reinicia com o schema evoluído, por isso o Job precisa de retry. Com schema fornecido, o padrão passa a ser `none` (a coluna nova é ignorada). |
+| [Work with table history](https://docs.databricks.com/aws/en/tables/history) | Rollback e time travel no reprocessamento. O histórico tem retenção de 30 dias por padrão, mas a documentação recomenda confiar em time travel apenas nos últimos 7 dias, a menos que retenção de dados e de log sejam ampliadas. |
+| [Isolation levels and write conflicts](https://docs.databricks.com/aws/en/optimizations/isolation/row-level-concurrency) | Isolamento por snapshot para os leitores durante o reprocessamento, e os conflitos de escrita esperados (`ConcurrentAppendException`) entre `MERGE` e appends. |
+| [Manually apply row filters and column masks](https://docs.databricks.com/aws/en/data-governance/unity-catalog/filters-and-masks/manually-apply) | Column mask em `dados_bancarios` e row filter por planta. |
+| [Row filters and column masks — visão geral](https://docs.databricks.com/aws/tables/row-and-column-filters) | Comparação entre a atribuição manual por tabela e as políticas **ABAC** (por tags governadas), que a documentação recomenda para a maioria dos casos que exigem consistência em muitas tabelas. |
+| [System tables](https://docs.databricks.com/aws/en/admin/system-tables) e [Lineage system tables](https://docs.databricks.com/aws/en/admin/system-tables/lineage) | Auditoria e linhagem: `system.access.audit`, `system.access.table_lineage` e `system.access.column_lineage`. |
+| [Trigger jobs when new files arrive](https://docs.databricks.com/aws/en/jobs/file-arrival-triggers.html) | Disparo de ingestão pela chegada de arquivos em um volume ou external location do Unity Catalog. |
 
-## Segurança, Gestão de Segredos
-   * [Azure Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)
-   * [Azure resources](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)
-   * [IAM Roles e Políticas de Menor Privilégio](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html)
+---
 
-## Padrões de Ingestão, Eventos e Armazenamento
-   * [Azure Data Factory / Synapse Pipelines](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory)
-   * [Event Grid](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema)
-   * [MERGE INTO e Gravação Idempotente](https://docs.delta.io/delta-update/)
+## Parte 2 — Pipeline PySpark
 
-## Observabilidade, Monitoramento e Alertas
-   * [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview)
-   * [Alertas de Métrica e Regras de Agendamento no Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview)
-   * [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Spark SQL — CSV data source options](https://spark.apache.org/docs/latest/sql-data-sources-csv.html) | Por que não usar `spark.read.schema(...)` no CSV: com `enforceSchema=true` (padrão) o schema é aplicado **por posição** e o header é ignorado, e a própria documentação recomenda desabilitar a opção para evitar resultados incorretos. Também: `inferSchema` exige uma passagem extra sobre os dados. |
+| [Configure schema inference and evolution in Auto Loader](https://docs.databricks.com/en/ingestion/auto-loader/schema.html) | Bronze com evolução de schema e `schemaLocation`; modos `addNewColumns`, `rescue` e `none`. |
+| [Table deletes, updates, and merges (Delta Lake)](https://docs.delta.io/delta-update/) | Sintaxe do `MERGE` na API Python: `whenMatchedUpdate` e `whenNotMatchedInsert` (com `values=`). Base da correção dos métodos usados no SCD2. |
+| [Use foreachBatch to write to arbitrary data sinks](https://docs.databricks.com/aws/en/structured-streaming/foreach.html) | `foreachBatch` oferece garantia *at-least-once*; para escritas Delta idempotentes usa-se `txnAppId` + `txnVersion` ligado ao `batchId`; a orientação é **deixar os erros propagarem** para o orquestrador reexecutar o lote. A página também recomenda vários *writers* de streaming em vez de escrever em vários destinos no mesmo `foreachBatch` (trade-off do pipeline: quarentena + Silver). |
+| [Apply watermarks to control data processing thresholds](https://docs.databricks.com/aws/en/structured-streaming/watermarks) | `dropDuplicatesWithinWatermark` (Databricks Runtime 13.3 LTS+): exige watermark; para eliminar **todas** as duplicatas, o watermark deve ser maior que a diferença máxima de timestamp entre duplicatas. |
+| [Structured Streaming Programming Guide — seção "Streaming Deduplication"](https://spark.apache.org/docs/latest/) | Deduplicação com watermark: incluir a coluna de event time nas colunas de deduplicação para que o estado seja limpo; sem watermark, todo o histórico fica no estado. |
+| [The AUTO CDC APIs](https://docs.databricks.com/delta-live-tables/cdc.html) e [AUTO CDC INTO (SQL)](https://docs.databricks.com/aws/dlt-ref/dlt-sql-ref-apply-changes-into) | SCD Tipo 2 gerenciado (`STORED AS SCD TYPE 2`, `SEQUENCE BY`). A documentação observa que o `MERGE INTO` pode produzir resultados incorretos com registros fora de sequência e oferece `AUTO CDC FROM SNAPSHOT` (Python) para snapshots. É a referência para justificar por que a entrega usa `MERGE` com guarda de vigência (dependência de pipelines serverless ou nas edições Pro/Advanced). |
+
+---
+
+## Parte 3 — SQL avançado
+
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Window frame clause](https://docs.databricks.com/aws/sql/language-manual/sql-ref-syntax-window-functions-frame) | `RANGE` exige um único `ORDER BY` e expressa os limites como deslocamento sobre a expressão de ordenação. Base do `RANGE BETWEEN 7 PRECEDING AND 1 PRECEDING` sobre o número do dia (dias corridos, sem depender de `ROWS`). |
+| [Spark SQL — Window Functions](https://spark.apache.org/docs/latest/sql-ref-syntax-qry-select-window.html) | `LAG`, `ROW_NUMBER`, agregações com `OVER` e a cláusula `WINDOW` nomeada. |
+| [Spark SQL — Built-in Functions](https://spark.apache.org/docs/latest/api/sql/index.html) | Funções usadas nas consultas: `sequence`, `explode`, `trunc`, `add_months`, `datediff`, `stddev_samp`, `collect_set`, `slice`. |
+
+---
+
+## Parte 4 — Troubleshooting e performance
+
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Spark SQL — Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html) **(lista original)** | Dicas de estratégia de join, cache e AQE; configurações `spark.sql.adaptive.*`. Valores padrão citados no texto: `skewedPartitionFactor` 5.0, `skewedPartitionThresholdInBytes` 256 MB; `spark.sql.adaptive.autoBroadcastJoinThreshold` existe desde o Spark 3.2 e, sem definição, usa o valor de `spark.sql.autoBroadcastJoinThreshold`; o `skewJoin` do AQE trata *skew* em joins (sort-merge e shuffled hash). |
+| [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html) **(lista original)** | Memória, serialização e paralelismo. |
+| [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe) **(lista original)** | Comportamento do AQE no Databricks (coalescência de partições, troca de estratégia de join, skew join). |
+| [Spark Web UI](https://spark.apache.org/docs/latest/web-ui.html) | Leitura das abas Jobs, Stages, Executors e SQL no diagnóstico (métricas de tasks, *spill*, GC, plano de execução). |
+| [Optimize data file layout](https://docs.databricks.com/aws/en/tables/operations/optimize) e [Predictive optimization](https://docs.databricks.com/aws/optimizations/predictive-optimization) | Layout de arquivos e estatísticas (`ANALYZE`) que alimentam as decisões do otimizador. |
+
+---
+
+## Parte 5 — Integração e nuvem
+
+> **Mantenha apenas a nuvem escolhida.** O enunciado pede AWS **ou** Azure. Esta seção lista as duas para você remover a que não usar.
+
+**Comum (Databricks)**
+
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Automate jobs with schedules and triggers](https://docs.databricks.com/aws/en/jobs/triggers) e [File arrival triggers](https://docs.databricks.com/aws/en/jobs/file-arrival-triggers.html) | Disparo por chegada de arquivo (custo zero em dias sem arquivo, além da listagem no storage) em vez de cluster ligado. O gatilho só existe **depois** que o arquivo pousa no storage. |
+| [Use foreachBatch — escritas idempotentes](https://docs.databricks.com/aws/en/structured-streaming/foreach.html) e [Delta MERGE](https://docs.delta.io/delta-update/) | Reexecução segura da ingestão (idempotência por `txnAppId`/`txnVersion` e por chave no `MERGE`). |
+
+**Azure**
+
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [Azure Key Vault — visão geral](https://learn.microsoft.com/en-us/azure/key-vault/general/overview) **(lista original)** | Cofre de segredos para credenciais do SFTP/API. |
+| [Managed identities para recursos do Azure](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview) **(lista original)** | Autenticação sem credenciais estáticas. |
+| [Secret management no Azure Databricks](https://learn.microsoft.com/azure/databricks/security/secrets) | Secret scope **respaldado por Key Vault** (interface somente leitura para o cofre), com escopos alinhados a papéis ou aplicações. |
+| [Conector SFTP do Azure Data Factory](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory) **(lista original)** | Cópia do arquivo do SFTP externo para o data lake. |
+| [Event Grid — schema de eventos do Blob Storage](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema) **(lista original)** | Eventos de criação de blob após o pouso do arquivo. |
+| [Azure Monitor — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview) e [Alertas — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview) **(lista original)** | Observabilidade e alertas de falha e atraso. |
+
+**AWS**
+
+| Referência | O que sustenta na entrega |
+| :-- | :-- |
+| [IAM roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html) **(lista original)** | Credenciais temporárias por função em vez de chaves estáticas. Para *menor privilégio*, cite também a página de boas práticas do IAM. |
+| [O que é o Amazon EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) **(lista original)** | Regras agendadas e orientadas a eventos para detecção de atraso. |
+
+---
+
+## Documentação de apoio (visão geral)
+
+- [Delta Lake no Databricks](https://docs.databricks.com/aws/en/delta) **(lista original)**
+- [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader) **(lista original)**
+
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
