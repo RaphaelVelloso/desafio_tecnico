@@ -9,8 +9,8 @@
 - [Parte 3 — SQL Avançado](#parte-3--sql-avançado)
 - [Parte 4 — Troubleshooting e Performance](#parte-4--troubleshooting-e-performance)
 - [Parte 5 — Integração e nuvem](#parte-5--integração-e-nuvem)
-- [Parte 6 — Uso Crítico de Ferramentas de IA](#parte-6--uso-critico-de-ferramentas-de-ia)
-- [Documentação](#Documentacao)
+- [Parte 6 — Uso Crítico de Ferramentas de IA](#parte-6--uso-crítico-de-ferramentas-de-ia)
+- [Documentação](#documentacao)
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
