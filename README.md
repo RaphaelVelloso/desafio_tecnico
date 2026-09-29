@@ -32,6 +32,7 @@
 | **Gold** (Business) | `feature_store_ds` | Semanal / Sob Demanda | Batch ETL | Delta Lake<br/>*Liquid Clustering: `sensor_id`, `planta_id`* | Matriz de features consolidadas para modelos preditivos e Machine Learning. | `datascience_catalog.feature_store` |
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 2 — Pipeline PySpark
@@ -82,6 +83,7 @@
    <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/sensores_iot.py" target="_blank">Exemplo simplificado deduplicacao</a>
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 3 — SQL Avançado
@@ -98,6 +100,7 @@
    <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/silver.eventos_sap.sql" target="_blank">Codigo SQL para os 3 topicos</a>
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 4 — Troubleshooting e Performance
@@ -186,6 +189,7 @@
    * Uso consciente de Caching: Se a tabela cadastro_fornecedores ou o dataset intermediário de sensores for reutilizado múltiplas vezes no mesmo DAG, faça o .persist(StorageLevel.MEMORY_AND_DISK) e lembre-se de dar .unpersist() ao final do job.
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 5 — Integração e nuvem
@@ -268,6 +272,7 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
       * Políticas integradas de retenção movem os dados da camada Raw para armazenamento de arquivamento após 30 dias, programando o expurgo definitivo após 1 ano.
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Parte 6 — Uso Crítico de Ferramentas de IA
@@ -305,6 +310,7 @@ Passei a validar não apenas se o código executa, mas também suas premissas, c
 Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas não substituem o conhecimento técnico e a validação do resultado.
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
+
 ---
 
 # Documentação
