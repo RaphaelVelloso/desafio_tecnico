@@ -2,7 +2,14 @@
 
 # Projeto NioMetal S.A. - Desafio Técnico
 
-## Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
+## Índice
+
+- [Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.](#parte-1--arquitetura-medallion--plataforma-niometal-sa)
+- [Parte 2 — Refatoração do Pipeline](#parte-2--refatoração-do-pipeline)
+- [Parte 3 — SCD Tipo 2](#parte-3--scd-tipo-2)
+- [Parte 4 — Deduplicação de IoT](#parte-4--deduplicação-de-iot)
+
+# Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
 | Camada | Fonte / Dataset | SLA / Frequência | Estratégia de Ingestão | Formato & Particionamento | Tratamento & Schema Evolution | Governança (Unity Catalog) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
