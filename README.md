@@ -25,58 +25,88 @@
 
 ## 1. Problemas Técnicos Identificados no Código Original
 
-1. **Gargalo de Memória e Risco de Out-Of-Memory (`df.collect()`)**:  
-   O método `collect()` traz todos os dados distribuídos do cluster para a memória do *Driver Node*. Em volumes reais de produção, isso gera um alto gargalo de I/O de rede e causa exceções de *Out Of Memory* (OOM), anulando o poder de processamento distribuído do Spark.
-2. **Processamento Iterativo Não Distribuído (Loop `for` em Python)**:  
-   Iterar linha a linha (`for linha in dados`) força a execução sequencial na CPU do *Driver Node*. As operações do PySpark devem ser aplicadas de forma vetorial e distribuída entre os *Executors*.
-3. **Ausência de Enforcement de Schema e Leitura Lenta**:  
-   A leitura sem a definição de um `schema` explícito exige que o Spark infira os tipos de dados ou leia tudo como *String*, tornando a ingestão lenta e propensa a falhas de tipagem na conversão.
-4. **Operação Não Idempotente (`mode('overwrite')`)**:  
-   Sobreescrever a tabela Silver inteira a cada execução apaga o histórico de dados, causa *downtime* para os consumidores da camada Gold/Dashboards durante a carga e gera custo computacional desnecessário.
-5. **Incapacidade de Tratar Mudança de Schema**:  
-   O código original ignora a transição da coluna `planta_id` para `id_planta` ao longo do arquivo, o que lança erros de chave (`KeyError`) ao tentar acessar `linha['toneladas_produzidas']`.
+   1. **Gargalo de Memória e Risco de Out-Of-Memory (`df.collect()`)**:  
+      O método `collect()` traz todos os dados distribuídos do cluster para a memória do *Driver Node*. Em volumes reais de produção, isso gera um alto gargalo de I/O de rede e causa exceções de *Out Of Memory* (OOM), anulando o poder de processamento distribuído do Spark.
+   2. **Processamento Iterativo Não Distribuído (Loop `for` em Python)**:  
+      Iterar linha a linha (`for linha in dados`) força a execução sequencial na CPU do *Driver Node*. As operações do PySpark devem ser aplicadas de forma vetorial e distribuída entre os *Executors*.
+   3. **Ausência de Enforcement de Schema e Leitura Lenta**:  
+      A leitura sem a definição de um `schema` explícito exige que o Spark infira os tipos de dados ou leia tudo como *String*, tornando a ingestão lenta e propensa a falhas de tipagem na conversão.
+   4. **Operação Não Idempotente (`mode('overwrite')`)**:  
+      Sobreescrever a tabela Silver inteira a cada execução apaga o histórico de dados, causa *downtime* para os consumidores da camada Gold/Dashboards durante a carga e gera custo computacional desnecessário.
+   5. **Incapacidade de Tratar Mudança de Schema**:  
+      O código original ignora a transição da coluna `planta_id` para `id_planta` ao longo do arquivo, o que lança erros de chave (`KeyError`) ao tentar acessar `linha['toneladas_produzidas']`.
 
-   ## 2. Pipeline Refatorado de Produção (`producao_moinhos.csv`)
-
+## 2. Pipeline Refatorado de Produção (`producao_moinhos.csv`)
+   
    [Codigo producao moinhos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/processo_moinhos.py)
 
-   ## 3. Dimensão de Histórico SCD Tipo 2
+## 3. Dimensão de Histórico SCD Tipo 2
 
    [Diagrama controle cadastro fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_cadastro_fornecedor.markdown)
 
    [Codigo para cadastro de fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/cadastro_fornecedores.py)
 
-   ## 4. Estratégia de Deduplicação de Dados Fora de Ordem
+## 4. Estratégia de Deduplicação de Dados Fora de Ordem
 
-   ### Structured Streaming com Watermarking
+### Structured Streaming com Watermarking
 
    A estratégia ideal em Spark/Databricks para resolver este problema em tempo real (ou em micro-batches contínuos) baseia-se na combinação de dois conceitos: Watermarking e Deduplicação de Estado (Stateful Deduplication).
 
    [Diagrama watermark](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_iot.md)
 
-   ### Como Funciona a Mecânica Interna:
-    #### 1. Janela de Watermark (Tolerância ao Atraso):
-        O Watermark estabelece o limite de tempo que o engine do Spark aceita esperar por dados atrasados em relação ao maior timestamp visto até ao momento.
-        Exemplo: Com .withWatermark("timestamp", "2 hours"), se o Spark já processou um evento de 14:00, eventos com timestamp anterior a 12:00 serão descartados se chegarem depois.
+### Como Funciona a Mecânica Interna:
+#### 1. Janela de Watermark (Tolerância ao Atraso):
+   O Watermark estabelece o limite de tempo que o engine do Spark aceita esperar por dados atrasados em relação ao maior timestamp visto até ao momento.
+   Exemplo: Com .withWatermark("timestamp", "2 hours"), se o Spark já processou um evento de 14:00, eventos com timestamp anterior a 12:00 serão descartados se chegarem depois.
 
-    #### 2. Gerenciamento de Estado (RocksDB/State Store):
-        O Spark mantém um registo temporário das chaves únicas de dedup (sensor_id + timestamp) na memória/disco do executor. Quando um evento duplicado chega dentro da janela de 2 horas, o Spark compara-o com o estado e descarta-o.
+#### 2. Gerenciamento de Estado (RocksDB/State Store):
+   O Spark mantém um registo temporário das chaves únicas de dedup (sensor_id + timestamp) na memória/disco do executor. Quando um evento duplicado chega dentro da janela de 2 horas, o Spark compara-o com o estado e descarta-o.
 
-    #### 3. Limpeza Automática de Estado (Garbage Collection):
-        Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
+#### 3. Limpeza Automática de Estado (Garbage Collection):
+   Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
 
-    [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/sensores_iot.py)
+   [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/sensores_iot.py)
 
+---
 
-    # Parte 3 — SQL avançado
+# Parte 3 — SQL avançado
 
-    ## 1. Moinhos com Maior Queda Percentual de Produção Mês a Mês (Últimos 6 Meses)
-    Esta consulta calcula a produção consolidada por mês/moinho, busca o valor do mês anterior através da função de janela LAG(), calcula a variação percentual e identifica os 3 moinhos com a maior queda percentual no período.
+## 1. Moinhos com Maior Queda Percentual de Produção Mês a Mês (Últimos 6 Meses)
+   Esta consulta calcula a produção consolidada por mês/moinho, busca o valor do mês anterior através da função de janela LAG(), calcula a variação percentual e identifica os 3 moinhos com a maior queda percentual no período.
 
-    ## 2. Detecção de Anomalias de Produção (Média Móvel e Desvio Padrão de 7 Dias)
-    Esta consulta analisa a série temporal diária por moinho e calcula a média móvel e o desvio padrão dos últimos 7 dias (sem incluir o próprio dia do evento, evitando contaminação do cálculo pelo pico de anomalia).
+## 2. Detecção de Anomalias de Produção (Média Móvel e Desvio Padrão de 7 Dias)
+   Esta consulta analisa a série temporal diária por moinho e calcula a média móvel e o desvio padrão dos últimos 7 dias (sem incluir o próprio dia do evento, evitando contaminação do cálculo pelo pico de anomalia).
 
-    ## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
-    Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
+## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
+   Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
 
-    [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/silver.eventos_sap.sql)
+   [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/silver.eventos_sap.sql)
+
+---
+
+# Parte 4 — Troubleshooting e performance
+
+   Ao investigar uma degradação severa sem alteração de código, a investigação deve ir do nível macro (infra/recursos) para o nível micro (execução de DAG/código)
+
+## 1. Análise das Métricas Globais do Cluster
+   * Verifique se o autoscaling escalou até o limite máximo (8 workers).
+
+   * Cheque se houve degradação na rede, I/O de armazenamento ou gargalo de CPU/Memória nos nós.
+
+## 2. Executors - Spark UI
+   * Identificar se os executores estão gastando muito tempo em GC Pauses.
+
+   * Verificar se há Spill de memória/disco elevados, o que indica que os dados não cabem na RAM durante as operações wide
+
+## 3. Jobs / Stages - Spark UI
+   * Localizar qual Stage exato está consumindo a maior parte das 4 horas.
+
+   * Analisar o gráfico de barras de duração das tasks dentro do Stage:
+
+      * Diagnóstico de Data Skew (uma ou poucas tarefas processando quase tudo)
+
+      * Falta de paralelismo, problema de I/O ou estouro de memória no Driver/Executors.
+
+## 4. Análise do Plano de Execução
+
+   * Verificar se o Spark tentou realizar o Broadcast Join com uma tabela que ficou grande demais, forçando troca para SortMergeJoin ou causando Driver Out-Of-Memory (OOM)
