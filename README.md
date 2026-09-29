@@ -254,6 +254,7 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
 # Parte 6 — Uso crítico de ferramentas de IA
 
+   * IA — ChatGPT
 
 
 ---
