@@ -1,3 +1,5 @@
+# Metodologia 
+
 A IA foi utilizada no desenvolvimento do meu desafio para me auxiliar em pesquisas de documentacoes, organizacao do texto, elaboracao de raciocinio e validacao de conteudo.
 
 O prompt usado foi: 
