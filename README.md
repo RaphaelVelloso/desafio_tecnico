@@ -110,3 +110,61 @@
 ## 4. Análise do Plano de Execução
 
    * Verificar se o Spark tentou realizar o Broadcast Join com uma tabela que ficou grande demais, forçando troca para SortMergeJoin ou causando Driver Out-Of-Memory (OOM)
+
+## 5. Hipoteses para a degradação
+### 5.1 Falha no Broadcast Join
+
+   * O enunciado menciona que a tabela cadastro_fornecedores cresceu bastante.
+
+   * Se a tabela superou o limite de broadcast (padrão de 10 MB), o Spark altera a estratégia para SortMergeJoin ou Shuffle Hash Join. Isso introduz uma etapa massiva de Shuffle que não existia anteriormente.
+
+   * Se o otimizador (ou o código) continuou forçando o broadcast() de uma tabela que ficou gigante, a tabela inteira foi enviada do Driver para todos os Executors, causando uso excessivo de memória, picos brutais de GC e gravação excessiva em disco.
+
+### 5.2 Data Skew nas Transformações Wide
+
+   * Raciocínio: O dataset de sensores costuma crescer de forma desigual (ex.: um sensor com defeito enviando milhões de eventos, ou concentração de eventos em um único timestamp ou fornecedor_id).
+
+   * Como o pipeline faz múltiplas transformações wide (operações com Shuffle como groupBy, join ou dropDuplicates), dados agrupados pela mesma chave serão enviados para a mesma partição.
+
+   * Se 99% das tarefas terminam em segundos e 1 tarefa fica travada por horas processando a chave desproporcional, o job inteiro fica retido aguardando essa tarefa.
+
+## 6. Otimizações Concretas e Ações de Mitigação
+
+### 6.1 Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+
+   * Converter arquivos raw para Delta/Parquet: Se o sensores_iot.json é lido em formato texto cru, usar o Auto Loader (cloudFiles) para ingerir em Delta Lake com suporte a file notification.
+
+   * Compactação de arquivos pequenos (Small Files Problem): Executar um OPTIMIZE na tabela de fornecedores para juntar múltiplos arquivos pequenos em arquivos maiores de 1GB, reduzindo as chamadas de API ao storage.
+
+### 6.2 Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+
+   * Reduzir o uso da Heap para cache: Reajustar a fração de memória usada para execução e armazenamento via spark.memory.fraction ou evitar usar .cache() em grandes conjuntos de dados desnecessariamente
+
+### 6.3 Problema: Data Skew 
+
+   * Mitigação Automática com AQE Skew Join: Habilitar o tratamento automático de assimetria do Spark:
+
+      Exemplos de configurações:
+      * Habilita a execução adaptativa de consultas
+         spark.conf.set("spark.sql.adaptive.enabled", "true")
+
+      * Converte dinamicamente SortMergeJoin em BroadcastJoin se a tabela filtrada for pequena
+         spark.conf.set("spark.sql.adaptive.autoBroadcastJoinThreshold.enabled", "true")
+
+      * Trata DATA SKEW automaticamente dividindo partições grandes em sub-partições
+         spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+         spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+         spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256MB")
+
+      * Consolida partições pequenas de Shuffle automaticamente
+         spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
+   * Técnica Manual de Salting: Se a chave do groupBy ou join estiver muito concentrada (ex.: um único sensor_id tem 80% das leituras), acrescente uma coluna de "sal" aleatório para quebrar o dado em múltiplas partições antes da operação wide.
+
+### 6.4 Estratégia de Particionamento, Reparticionamento e Caching
+
+   * Evitar repartition() desnecessário: Se o pipeline faz repartition() sem necessidade antes das transformações wide, substitua por coalesce() quando apenas reduzir partições.
+
+   * Ajuste de Partições de Shuffle (spark.sql.shuffle.partitions): O valor padrão (200) pode ser pequeno para o novo volume. Com AQE habilitado, pode-se definir um número inicial maior (ex.: 800), e o Spark reduzirá automaticamente se necessário.
+
+   * Uso consciente de Caching: Se a tabela cadastro_fornecedores ou o dataset intermediário de sensores for reutilizado múltiplas vezes no mesmo DAG, faça o .persist(StorageLevel.MEMORY_AND_DISK) e lembre-se de dar .unpersist() ao final do job.
