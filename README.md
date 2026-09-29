@@ -2,7 +2,7 @@
 
 # Projeto NioMetal S.A. - Desafio Técnico
 
-## Índice
+# Índice
 
 - [Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.](#parte-1--arquitetura-medallion--plataforma-niometal-sa)
 - [Parte 2 — Pipeline PySpark](#parte-2--pipeline-pyspark)
@@ -10,7 +10,7 @@
 - [Parte 4 — Troubleshooting e Performance](#parte-4--troubleshooting-e-performance)
 - [Parte 5 — Integração e nuvem](#parte-5--integração-e-nuvem)
 - [Parte 6 — Uso Crítico de Ferramentas de IA](#parte-6--uso-crítico-de-ferramentas-de-ia)
-- [Documentação](#documentacao)
+- [Documentação](#documentação)
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
@@ -29,6 +29,7 @@
 | **Gold** (Business) | `relatorios_financeiros_sap` | Mensal | Scheduled Batch | Delta Lake<br/>Partição: `ano_mes` | Relatórios consolidados de fechamento contábil e auditoria financeira. | `financeiro_catalog.gold` (Full) |
 | **Gold** (Business) | `feature_store_ds` | Semanal / Sob Demanda | Batch ETL | Delta Lake<br/>*Liquid Clustering: `sensor_id`, `planta_id`* | Matriz de features consolidadas para modelos preditivos e Machine Learning. | `datascience_catalog.feature_store` |
 
+[⬆️ Voltar ao topo](#indice)
 ---
 
 # Parte 2 — Pipeline PySpark
@@ -77,6 +78,7 @@
 
    [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/sensores_iot.py)
 
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
 ---
 
 # Parte 3 — SQL Avançado
@@ -92,6 +94,7 @@
 
    [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/silver.eventos_sap.sql)
 
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
 ---
 
 # Parte 4 — Troubleshooting e Performance
@@ -179,6 +182,7 @@
 
    * Uso consciente de Caching: Se a tabela cadastro_fornecedores ou o dataset intermediário de sensores for reutilizado múltiplas vezes no mesmo DAG, faça o .persist(StorageLevel.MEMORY_AND_DISK) e lembre-se de dar .unpersist() ao final do job.
 
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
 ---
 
 # Parte 5 — Integração e nuvem
@@ -260,6 +264,7 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
       * Políticas integradas de retenção movem os dados da camada Raw para armazenamento de arquivamento após 30 dias, programando o expurgo definitivo após 1 ano.
 
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
 ---
 
 # Parte 6 — Uso Crítico de Ferramentas de IA
@@ -296,6 +301,7 @@ A principal lição foi que a IA deve ser utilizada como ferramenta de apoio, e 
 Passei a validar não apenas se o código executa, mas também suas premissas, cardinalidade, casos de borda, volumetria e resultados esperados.
 Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas não substituem o conhecimento técnico e a validação do resultado.
 
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
 ---
 
 # Documentação
@@ -323,3 +329,5 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
    * [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview)
    * [Alertas de Métrica e Regras de Agendamento no Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview)
    * [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)
+
+[⬆️ Voltar ao topo](#niometal--desafio-técnico)
