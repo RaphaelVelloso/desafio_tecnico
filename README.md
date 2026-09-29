@@ -87,6 +87,225 @@ flowchart LR
     G4 --> C3
 ```
 
+**Princípios que orientam o desenho:**
+
+1. **Bronze é imutável e é a fonte da verdade.** Tudo que está em Silver e Gold pode ser reconstruído a partir dele, e isso viabiliza o reprocessamento histórico (seção 5).
+2. **Silver aplica regras de negócio e qualidade.** Ele garante tipos, fuso horário, deduplicação e chaves normalizadas, e registros rejeitados vão para quarentena com motivo, sem descarte silencioso.
+3. **Gold é o contrato com o consumidor.** Consumidores leem visões estáveis, e as tabelas físicas por trás podem ser versionadas.
+4. **A propriedade é por domínio.** Operações e Financeiro são donos de seus dados, e Data Science acessa por *grants*, sem copiar dados.
+
+
+## 2. Estratégia de ingestão: batch vs. streaming
+
+| Fonte | SLA | Modo | Por que essa escolha | Alternativa descartada |
+| :-- | :-- | :-- | :-- | :-- |
+| `sensores_iot.json` | Minutos | **Streaming** (Auto Loader, `trigger(processingTime="1 minute")`) | O fluxo é contínuo e o SLA é de minutos. O Auto Loader escala a descoberta de arquivos (file notification ou listagem incremental, conforme o volume) e o checkpoint dá semântica exactly-once na escrita em Delta. | `availableNow` agendado a cada N minutos é mais barato, mas a latência passa a ser o intervalo do agendamento. Serve se o SLA real for de 5 a 10 min. |
+| `producao_moinhos.csv` | Diário / intra-diário | **Batch incremental** (Auto Loader `availableNow`) | Os dados chegam em lotes de arquivo. O checkpoint do Auto Loader processa só arquivos novos e o cluster fica ligado apenas durante a carga. | Ler o diretório inteiro a cada execução reprocessa o histórico. Streaming contínuo mantém cluster ligado sem ganho de SLA. |
+| `cadastro_fornecedores.csv` | Diário / semanal | **Batch agendado** de snapshots | O volume é baixo e as mudanças são raras. O histórico é construído na Silver via SCD2. | Streaming não traz ganho para uma dimensão que muda esporadicamente. |
+| `eventos_sap.csv` | Mensal | **Batch agendado**: carga diária incremental + fechamento mensal | O relatório é mensal, mas a carga diária evita um pico no fechamento e antecipa a detecção de fornecedores órfãos. | Streaming: a fonte é uma extração em lote de um ERP legado. |
+
+> **Sobre `AvailableNow` e `ProcessingTime`:** são modos diferentes. `processingTime` mantém uma query contínua (baixa latência). `availableNow` processa o que houver e encerra (batch incremental). O desenho usa cada um onde o SLA pede.
+
+### 2.1 sensores_iot
+
+**Bronze** (`bronze.sensores_iot`):
+- Append-only do JSON bruto com metadados (`_ingestion_ts`, `_source_file` via `_metadata.file_path`).
+- A coluna `_rescued_data` preserva o que não casa com o schema.
+- Usar `cloudFiles.schemaHints` só para tipos críticos, e não um `.schema()` completo. Com schema explícito completo o Auto Loader não infere nem evolui.
+
+**Silver** (`silver.sensores_iot`) com **deduplicação em duas camadas**:
+- **Caminho quase em tempo real:** `withWatermark("event_ts", "2 hours")` + `dropDuplicatesWithinWatermark(["sensor_id", "event_ts"])`. O estado é limitado pelo watermark. A variante `dropDuplicatesWithinWatermark` (Spark 3.5+ / DBR 13.3+) não exige o event time na lista de colunas, e sem ele o estado de um `dropDuplicates` comum nunca expiraria.
+- **Reconciliação diária a partir do Bronze:** um `MERGE` *insert-only* por `(sensor_id, event_ts)` recupera eventos que chegaram depois do watermark. Isso evita perda silenciosa.
+- **Por que os dois:** o stream entrega latência baixa. O Bronze guarda tudo, então a reconciliação garante completude sem precisar de um watermark gigante (que faria o estado crescer).
+
+**Gold:** `dash_operacao_sensores` é uma agregação em streaming com janelas de 1 a 5 min, lendo a Silver como stream. Correções históricas propagam via Change Data Feed ou reprocessamento da janela.
+
+### 2.2 producao_moinhos
+
+**Bronze:** o Auto Loader lê o CSV como string (comportamento padrão para formatos texto), com `schemaEvolutionMode=addNewColumns`. Assim a mudança de schema não derruba a carga por tipagem.
+
+**Silver:**
+- Converte `data_producao` para UTC. A regra é: offset ou `Z` no valor indica UTC, e sem offset vale o fuso da planta (tabela de fusos por planta).
+- Aplica `planta_id = coalesce(planta_id, id_planta)` e faz os *casts* de tipo.
+- Envia nulos em `toneladas_produzidas` e linhas malformadas para a **quarentena**, com motivo e arquivo de origem. Nulo não é zero, então não é convertido nem descartado.
+- Deduplica pela chave de negócio `(planta_id, moinho_id, data_producao)`, e vence a última ingestão. O `MERGE` é feito em `foreachBatch`, com deduplicação prévia dentro do lote, pois o `MERGE` falha com chaves duplicadas na origem.
+
+### 2.3 cadastro_fornecedores
+
+**Bronze:** guarda cada snapshot com `snapshot_date`.
+
+**Silver `dim_fornecedores`** (SCD Tipo 2):
+- Usa `AUTO CDC ... STORED AS SCD TYPE 2` (antigo `APPLY CHANGES INTO`, em Lakeflow Declarative Pipelines) com `SEQUENCE BY` a data de atualização da fonte. A alternativa é um único `MERGE` com chave nula para inserir a nova versão e fechar a antiga na mesma transação.
+- `valid_from`/`valid_to` usam a **vigência de negócio** (data da alteração na fonte), não a data da carga. Isso preserva joins point-in-time com eventos históricos.
+- A coluna `dados_bancarios` recebe *column mask* (seção 7).
+
+### 2.4 eventos_sap
+
+**Bronze:** mantém os lançamentos brutos, com metadados de lote.
+
+**Silver:**
+- **Chave do documento:** `BUKRS + BELNR + GJAHR`. Apenas `BELNR` não é único.
+- **Normalização de chaves:** `MATNR` (18 caracteres no ECC) e `LIFNR` seguem a conversão ALPHA do SAP. Valores numéricos recebem `lpad` com zeros, e valores alfanuméricos ficam como estão. `MATNR` é armazenado como string com espaço para 40 caracteres, para não travar uma futura migração para S/4HANA.
+- **Fornecedor órfão:** o evento **permanece na Silver** com `fornecedor_valido = false` e é registrado na quarentena/tabela de DQ. Dados financeiros não podem sumir, porque o total precisa reconciliar com o SAP. O relatório Gold mostra "fornecedor não cadastrado" como linha separada. Quando o fornecedor chegar ao cadastro, os eventos são revalidados.
+
+---
+
+# 3. Formato de armazenamento e particionamento
+
+**Formato:** Delta Lake em todas as camadas, como tabelas gerenciadas do Unity Catalog. O Delta dá transações ACID (leitores nunca veem estado parcial), `MERGE` idempotente, time travel e Change Data Feed. O Unity Catalog com *predictive optimization* automatiza `OPTIMIZE` e `VACUUM` quando habilitada.
+
+**Particionamento:** usar **Liquid Clustering** em vez de partições. O Liquid Clustering **não pode ser combinado com partições nem com `ZORDER` na mesma tabela**. Ele também permite trocar as chaves de clustering sem reescrever a tabela. Partições fixas só se justificariam em tabelas com volume da ordem de 1 TB ou mais e partições com pelo menos 1 GB, o que não é o caso de `eventos_sap` ou `producao`.
+
+| Tabela | Clustering | Motivo |
+| :-- | :-- | :-- |
+| `bronze.*` | Sem clustering, ou `ingestion_date` | Escrita append e leitura por faixa de ingestão (reprocessamento). |
+| `silver.sensores_iot` | `event_date, planta_id, sensor_id` | Consultas por período, planta e sensor. |
+| `silver.producao` | `data_producao_date, planta_id` | Consultas por período e planta. Volume moderado, então nada de partição. |
+| `silver.dim_fornecedores` | `fornecedor_id` | Tabela pequena, acessada por chave. |
+| `silver.eventos_sap` | `ano_mes, bukrs` | Relatórios mensais por empresa. |
+| `gold.*` | Chaves de consulta do dashboard/relatório | Otimizado por consumidor. |
+
+**Propriedades recomendadas (Silver):**
+
+```sql
+CREATE TABLE prod_operacoes.silver.sensores_iot (
+  sensor_id STRING NOT NULL,
+  planta_id STRING,
+  event_ts TIMESTAMP NOT NULL,
+  event_date DATE,
+  temperatura DOUBLE,
+  vibracao DOUBLE,
+  consumo_eletrico DOUBLE,
+  ingestion_ts TIMESTAMP,
+  source_file STRING
+)
+CLUSTER BY (event_date, planta_id, sensor_id)
+TBLPROPERTIES (
+  'delta.enableChangeDataFeed' = 'true',
+  'delta.columnMapping.mode' = 'name',
+  'delta.deletedFileRetentionDuration' = 'interval 30 days'
+);
+```
+
+- `NOT NULL` e `CHECK` constraints dão enforcement real no Delta. O `nullable=False` de um schema Spark é ignorado em fontes de arquivo.
+- Change Data Feed permite propagar correções para o Gold.
+- Column mapping habilita renomear ou remover colunas sem reescrever dados, e exige upgrade de protocolo (consumidores precisam de leitores compatíveis).
+- Ampliar `deletedFileRetentionDuration` (padrão de 7 dias) amplia a janela de time travel e de `RESTORE`.
+
+---
+
+## 4. Schema evolution (`planta_id` → `id_planta`)
+
+1. **Bronze absorve a mudança.** O Auto Loader usa `schemaLocation` e `addNewColumns`, com todas as colunas como string. Quando `id_planta` aparece, o stream **falha uma vez** (`UnknownFieldException`) e, ao reiniciar, segue com o schema evoluído. Por isso o Job precisa de **retry** (pelo menos 1), para não exigir intervenção manual. Tipos incompatíveis vão para `_rescued_data`.
+2. **Silver normaliza.** `planta_id = coalesce(planta_id, id_planta)` e depois descarta `id_planta`. O Bronze permanece fiel à origem, e a Silver mantém um contrato único, então os consumidores nunca veem a mudança.
+3. **Mudanças controladas do nosso lado** (renomear uma coluna da Silver, por exemplo) usam *column mapping* (`ALTER TABLE ... RENAME COLUMN`), que é uma operação de metadados.
+4. **Detecção:** todo evento de evolução de schema gera alerta, e um teste de contrato no CI valida o schema esperado da Silver.
+
+---
+
+## 5. Reprocessamento histórico sem downtime
+
+**Base técnica:**
+- O Bronze é imutável e a Silver é reconstruível de forma determinística e idempotente (`MERGE` por chave de negócio).
+- O Delta dá isolamento por snapshot: quem está lendo continua vendo a versão anterior até o commit.
+- Consumidores (BI, Data Science, Financeiro) leem **views estáveis**, e as tabelas físicas por trás podem ser versionadas.
+
+```mermaid
+flowchart LR
+    BR[("Bronze imutavel<br/>fonte da verdade")] --> JOB["Job de backfill<br/>compute isolado<br/>mesmo codigo, parametrizado por periodo"]
+    JOB --> V2["tabela fisica v2 - shadow"]
+    LIVE["Stream paralelo em v2<br/>startingVersion = ponto de corte"] --> V2
+    V2 --> VAL{"Validacao<br/>contagens, somas, DQ<br/>comparacao com v1"}
+    VAL -->|"reprovado"| FIX["Corrige e refaz<br/>consumidores nao afetados"]
+    VAL -->|"aprovado"| SW["CREATE OR REPLACE VIEW<br/>troca atomica da view de servico"]
+    SW --> CONS["Consumidores<br/>leem sempre a view"]
+    SW -.->|"rollback: reaponta a view"| V1["tabela fisica v1<br/>mantida por N dias"]
+```
+
+| Cenário | Estratégia | Por que não causa downtime |
+| :-- | :-- | :-- |
+| **A. Correção de uma janela** (poucos dias) | `MERGE` ou `replaceWhere` **na própria tabela**, lendo do Bronze. | Commit atômico com isolamento por snapshot. Downstream em streaming deve usar Change Data Feed ou `skipChangeCommits`, porque commits de overwrite/update quebram uma leitura em streaming que espera só appends. |
+| **B. Mudança de lógica com reconstrução total** | *Blue/green*: constrói a tabela `v2` em paralelo e valida contra `v1`. Depois faz `CREATE OR REPLACE VIEW` para apontar a view de serviço para `v2`. | A troca da view é uma operação de metadados atômica. Os consumidores nunca deixam de ter dados. |
+| **C. Idem, com stream no meio da cadeia** (Silver → Gold em streaming) | Reconstrói Silver `v2` e Gold `v2` **em paralelo**, cada um com seu checkpoint. Um stream ao vivo escreve em `v2` a partir do ponto de corte (`startingVersion` ou `startingTimestamp` do Bronze). A troca de view acontece na **borda de consumo (Gold)**. | Streaming não lê de views, então o swap fica na borda e não entre Silver e Gold. |
+| **D. Rollback** | Reapontar a view para `v1`, ou `RESTORE TABLE ... TO VERSION AS OF`. | O rollback via time travel só funciona dentro da retenção configurada (`deletedFileRetentionDuration`, `logRetentionDuration`). |
+
+**Cuidados:**
+- **Compute isolado:** o backfill roda em cluster/serverless próprio para não competir com os workloads de SLA.
+- **Validação antes do swap:** comparar contagem de linhas, somas de `toneladas_produzidas` e `valor`, e resultados de DQ entre `v1` e `v2`.
+- **Retenção da landing zone:** os arquivos brutos devem ficar retidos por pelo menos o horizonte de reprocessamento aceito (política de lifecycle).
+- **Sem reset do checkpoint do stream ao vivo:** o backfill usa checkpoint próprio.
+
+---
+
+## 6. Volumetria crescente
+
+- **Ingestão:** o Auto Loader (com file notification em alto volume) escala a descoberta de arquivos sem listar o diretório inteiro.
+- **Layout:** Liquid Clustering e *predictive optimization* mantêm o layout sem particionar demais. Otimizar a escrita (`optimizeWrite`, compactação automática) reduz small files.
+- **Compute:** compute separado por workload (streaming de sensores, batch de produção, backfill). O batch usa `availableNow` para pagar só pelo tempo de execução.
+- **Custo de armazenamento:** política de lifecycle move o raw antigo para camadas mais baratas.
+- **Monitoramento:** acompanhar número de arquivos e tamanho médio por tabela para detectar degradação de layout.
+
+---
+
+## 7. Governança de acesso (Unity Catalog)
+
+**Estrutura:**
+- **Um metastore** por região, com workspaces por ambiente.
+- **Catálogo por domínio e ambiente:** `prod_operacoes`, `prod_financeiro`, `prod_datascience` (e equivalentes `dev_` e `stg_`).
+- **Schemas por camada:** `bronze`, `silver`, `gold`, mais `quarentena` e `governance` (funções de máscara e filtros).
+- **Sem cópia de dados entre domínios.** Data Science recebe *grants* sobre Silver e Gold de Operações, em vez de ter uma segunda cópia da Silver.
+- **Grupos sincronizados do IdP:** `grp_engenharia_dados`, `grp_operacoes`, `grp_financeiro`, `grp_datascience`. Os jobs rodam como **service principal**, não como usuário pessoal.
+- **Ownership por grupo**, não por pessoa.
+
+**Matriz de acesso (mínimo privilégio):**
+
+| Schema | Engenharia (service principal) | Operações | Financeiro | Data Science |
+| :-- | :-- | :-- | :-- | :-- |
+| `prod_operacoes.bronze` | MODIFY | — | — | — |
+| `prod_operacoes.silver` | MODIFY | SELECT | — | SELECT |
+| `prod_operacoes.gold` | MODIFY | SELECT | — | SELECT |
+| `prod_financeiro.bronze` | MODIFY | — | — | — |
+| `prod_financeiro.silver` | MODIFY | — | SELECT | — (via view sem dados sensíveis, sob aprovação) |
+| `prod_financeiro.gold` | MODIFY | — | SELECT | — |
+| `prod_datascience.*` | — | SELECT nos resultados publicados | — | ALL PRIVILEGES |
+
+**Por que o Bronze fica fechado:** ele contém dados brutos, com duplicatas, fusos misturados e valores não validados. Expô-lo a usuários de negócio gera análises erradas e amplia a superfície de dados sensíveis.
+
+**Segurança fina:**
+
+```sql
+-- Column mask: dados bancarios so aparecem para auditoria financeira
+CREATE OR REPLACE FUNCTION prod_financeiro.governance.mask_dados_bancarios(v STRING)
+RETURNS STRING
+RETURN CASE WHEN is_account_group_member('grp_financeiro_auditoria') THEN v ELSE '****' END;
+
+ALTER TABLE prod_financeiro.silver.dim_fornecedores
+  ALTER COLUMN dados_bancarios SET MASK prod_financeiro.governance.mask_dados_bancarios;
+
+-- Row filter: usuario operacional enxerga apenas as plantas do seu grupo
+CREATE OR REPLACE FUNCTION prod_operacoes.governance.filtro_planta(p STRING)
+RETURNS BOOLEAN
+RETURN is_account_group_member('grp_operacoes_global')
+    OR is_account_group_member(CONCAT('grp_planta_', p));
+
+ALTER TABLE prod_operacoes.silver.producao SET ROW FILTER prod_operacoes.governance.filtro_planta ON (planta_id);
+```
+
+- **Armazenamento:** o acesso a arquivos é feito só por *external locations* e *storage credentials* do Unity Catalog. Nenhum usuário acessa o storage diretamente, e a landing zone é lida apenas pelo service principal de ingestão.
+- **Classificação:** tags de sensibilidade (`dados_bancarios`, `financeiro`) apoiam auditoria e políticas.
+- **Auditoria e linhagem:** as system tables (`system.access.audit`, `system.access.table_lineage`, `system.access.column_lineage`) e o histórico do Delta sustentam a auditoria da dimensão de fornecedores, que o enunciado destaca.
+
+---
+
+## 8. Qualidade de dados e observabilidade
+
+- **Regras de qualidade** (nulos, faixas, chaves, integridade referencial) declaradas como *expectations* (Lakeflow Declarative Pipelines) ou em módulo reutilizável, com política por regra: `warn`, `drop para quarentena` ou `fail`.
+- **Quarentena:** cada registro rejeitado guarda o payload, o motivo, o arquivo de origem e o timestamp, o que permite análise e reprocessamento.
+- **Frescor e SLA:** alerta quando `max(ingestion_ts)` de uma tabela ultrapassa o SLA da fonte. Job com falha, duração acima do esperado e evento de evolução de schema também alertam.
+- **Orquestração:** Databricks Workflows (Lakeflow Jobs) com retries, dependências e notificações.
+
+---
+
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
 
 ---
