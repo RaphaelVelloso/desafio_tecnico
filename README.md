@@ -683,15 +683,13 @@ flowchart TD
 | 7 | **Perfil dos dados** | Consultas de distribuição de chaves, tamanho e nº de arquivos | Chaves quentes; muitos arquivos pequenos; chaves duplicadas na dimensão | Fornece a causa, não só o sintoma |
 | 8 | **Experimento controlado** | Mesmo job sobre uma amostra ou um dia, mudando **uma variável** por vez | A duração muda ao remover o `broadcast()`, filtrar `is_current`, etc.? | Prova causal antes de alterar produção |
 
-**Regra de ouro:** só mudar configuração depois de saber em qual stage e por que o tempo é gasto. Adicionar workers às cegas custa mais e, se a causa for skew, **não reduz o tempo** (a tarefa lenta continua sendo uma só).
-
 ---
 
 ## 2. Hipóteses mais prováveis (em ordem)
 
 ### H1 — O broadcast join deixou de funcionar como antes porque a dimensão cresceu
 
-**Raciocínio.** O broadcast join só compensa quando o lado pequeno é realmente pequeno: ele é coletado no driver e replicado em **todos** os executores, então o custo cresce com o tamanho da tabela **e** com o número de nós. Ao crescer, dois cenários são possíveis:
+O broadcast join só compensa quando o lado pequeno é realmente pequeno: ele é coletado no driver e replicado em todos os executores, então o custo cresce com o tamanho da tabela e com o número de nós. Ao crescer, dois cenários são possíveis:
 
 1. **Sem `broadcast()` explícito:** a tabela passa do limite (padrão de 10 MB no Spark; o Databricks usa limiares próprios com o AQE, então confira no seu Runtime) e o Spark troca para **SortMergeJoin**. Isso exige embaralhar e ordenar a tabela **grande** de sensores, que antes não se movia. É a explicação mais direta para 40 min virar horas: um shuffle completo do lado maior.
 2. **Com `broadcast()` forçado:** o hint prevalece sobre o limite. A tabela inteira passa pelo driver e é enviada a todos os executores, gerando pressão de memória e GC, lentidão no `BroadcastExchange` e o risco de `BroadcastTimeoutException` (`spark.sql.broadcastTimeout`, padrão de 300 s) ou de estouro de memória. Há ainda um limite rígido de 8 GB por tabela em broadcast.
