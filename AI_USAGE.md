@@ -60,8 +60,6 @@ A coluna **"Verificado em execução?"** deve ser preenchida por você **depois 
 
 ### 4.2 Em outros arquivos e textos da entrega
 
-`[PREENCHER: ferramenta que gerou estes arquivos/textos, ou "escritos por mim"]`
-
 | # | Arquivo | Erro ou imprecisão | Como verificar |
 | :-- | :-- | :-- | :-- |
 | 8 | `cadastro_fornecedores.py`, `processo_moinhos.py` | `whenMatchedAnd` e `updateExpr` não existem no merge builder Python do Delta (o correto é `whenMatchedUpdate(condition=..., set=...)`); `whenNotMatchedInsert` recebe um dict no lugar do argumento `condition` | `[m for m in dir(DeltaMergeBuilder) if m.startswith("when")]` e rodar a função |
@@ -101,6 +99,5 @@ A coluna **"Verificado em execução?"** deve ser preenchida por você **depois 
 
 - O código de IA que compila e passa em uma amostra pequena pode falhar em **propriedades operacionais** (estado que cresce, atomicidade, concorrência, incrementalidade) que só aparecem em produção; testar essas propriedades é parte da revisão.
 - A IA foi coerente **dentro de cada resposta**, mas as respostas se contradiziam entre si (diagnóstico vs. código, schemas e nomes de coluna diferentes); a consistência entre artefatos precisa ser verificada por quem dirige.
-- Um segundo revisor (humano ou outra IA) encontra erros que o autor não vê, e o que ele afirma também precisa ser reproduzido antes de virar conclusão.
 
 ---
