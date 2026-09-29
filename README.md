@@ -515,20 +515,6 @@ As consultas usam os nomes do enunciado. Elas se conectam à arquitetura assim:
 | `silver.eventos_sap` | `prod_financeiro.silver.eventos_sap` | `data` é a data do lançamento. |
 | `silver.dim_fornecedores` | `prod_financeiro.silver.dim_fornecedores` | É o `cadastro_fornecedores` do enunciado, já como SCD Tipo 2. |
 
-Para rodar sobre as tabelas reais, crie *views* de compatibilidade ou substitua os nomes:
-
-```sql
-CREATE OR REPLACE VIEW silver.producao AS
-SELECT planta_id, moinho_id, data_producao_date AS data, toneladas_produzidas
-FROM prod_operacoes.silver.producao;
-```
-
-Outras premissas:
-
-- `data` é do tipo `DATE`. Se for `TIMESTAMP`, aplique `CAST(data AS DATE)`.
-- A Silver de produção **não tem duplicatas nem `toneladas_produzidas` nulo**, porque a Parte 2 deduplica e envia nulos para a quarentena. Assim, `SUM` por mês é completo, e a quantidade de registros em quarentena precisa ser acompanhada, pois ela é dado que falta nessas somas.
-- A tabela de produção só tem produção. Para "consumo" (consulta 2), o padrão é o mesmo, trocando a métrica e a tabela.
-
 ---
 
 ## Consulta 1 — Maiores quedas percentuais mês a mês
@@ -583,15 +569,9 @@ Outras premissas:
 | `dias_na_janela >= 5` | Com poucos pontos, o desvio é ruído. O limite é parametrizável em `parametros`. |
 | `desvio_7d > 0` | Com desvio 0, qualquer variação mínima seria "anômala". Limitação: uma produção constante que muda de repente não é sinalizada; uma tolerância absoluta mínima resolveria, se o negócio quiser. |
 
-**Saída:** além do dia, mostra média, desvio, limites inferior e superior e `z_score`, para que quem investiga veja o tamanho do desvio.
-
-**Desempenho:** a consulta varre todo o histórico. Em produção, restrinja a um período recente (mantendo 7 dias de folga para a janela) ou materialize a saída em uma tabela Gold atualizada de forma incremental.
-
 ---
 
 ## Consulta 3 — Integridade referencial de fornecedores
-
-Contém três consultas: **3a** (a pedida no enunciado), **3b** (informativa) e **3c** (opcional).
 
 ### 3a — Fornecedor inexistente, por mês
 
@@ -619,7 +599,7 @@ Detecta eventos cujo fornecedor existe, mas **não estava vigente na data do eve
 
 ---
 
-## Cenários que o dataset sintético deve cobrir
+## Cenários que o dataset deve cobrir
 
 Cada caso tem um resultado esperado conhecido, o que transforma a execução em evidência de que a consulta está correta.
 
@@ -654,88 +634,250 @@ Cada caso tem um resultado esperado conhecido, o que transforma a execução em 
 
    Ao investigar uma degradação severa sem alteração de código, a investigação deve ir do nível macro (infra/recursos) para o nível micro (execução de DAG/código)
 
-## 1. Análise das Métricas Globais do Cluster
-   * Verifique se o autoscaling escalou até o limite máximo (8 workers).
 
-   * Cheque se houve degradação na rede, I/O de armazenamento ou gargalo de CPU/Memória nos nós.
+## 0. Enquadramento: o que pode mudar quando "o código não mudou"
 
-## 2. Executors - Spark UI
-   * Identificar se os executores estão gastando muito tempo em GC Pauses.
+Sem mudança de código, só três coisas podem ter mudado. Isso organiza toda a investigação:
 
-   * Verificar se há Spill de memória/disco elevados, o que indica que os dados não cabem na RAM durante as operações wide
+| Domínio | Exemplos | Relação com o enunciado |
+| :-- | :-- | :-- |
+| **Dados** | Volume, distribuição das chaves (skew), tamanho e número de versões da dimensão, quantidade e tamanho de arquivos | O cadastro "cresceu bastante" |
+| **Ambiente** | Versão do Databricks Runtime, configurações do Spark, estatísticas das tabelas | Não citado; precisa ser descartado |
+| **Infraestrutura** | Autoscaling, instâncias spot perdidas, concorrência com outros jobs, throttling do storage | Autoscaling de 2 a 8 workers |
 
-## 3. Jobs / Stages - Spark UI
-   * Localizar qual Stage exato está consumindo a maior parte das 4 horas.
+**Um raciocínio de ordem de grandeza:** uma piora de ~6x (40 min → 4 h) raramente vem de uma causa linear (dados 6x maiores). Costuma vir de um **ponto de inflexão** (a tabela deixou de caber no broadcast, passou a haver *spill* em disco) ou de um **gargalo serial** (uma única tarefa muito maior que as demais). Por isso as hipóteses abaixo procuram esses dois padrões.
 
-   * Analisar o gráfico de barras de duração das tasks dentro do Stage:
+---
 
-      * Diagnóstico de Data Skew (uma ou poucas tarefas processando quase tudo)
+# 1. Diagnóstico: passos em ordem
 
-      * Falta de paralelismo, problema de I/O ou estouro de memória no Driver/Executors.
+A ordem vai do **barato e amplo** ao **caro e específico**: cada passo descarta hipóteses e diz onde olhar no seguinte.
 
-## 4. Análise do Plano de Execução
+```mermaid
+flowchart TD
+    A["Job: 40 min para 4 h+<br/>sem mudanca de codigo"] --> B["1. Baseline<br/>execucao boa x ruim"]
+    B --> C["2. Metricas do cluster<br/>e event log"]
+    C --> D["3. Spark UI: Jobs e Stages<br/>onde esta o tempo?"]
+    D --> E{"Poucas tasks muito<br/>maiores que as outras?"}
+    E -->|"Sim"| F["Skew<br/>H2"]
+    E -->|"Nao"| G{"Spill e GC altos<br/>nas tasks?"}
+    G -->|"Sim"| H["Volume x configuracao<br/>H3"]
+    G -->|"Nao"| I["4. SQL/plano de execucao"]
+    F --> I
+    H --> I
+    I --> J{"Estrategia de join<br/>e linhas apos o join"}
+    J -->|"SortMergeJoin no lugar de Broadcast<br/>ou broadcast enorme"| K["Broadcast<br/>H1"]
+    J -->|"Linhas apos o join > antes"| L["Fan-out da dimensao<br/>H4"]
+    K --> M["5. Perfil dos dados e experimento controlado"]
+    L --> M
+```
 
-   * Verificar se o Spark tentou realizar o Broadcast Join com uma tabela que ficou grande demais, forçando troca para SortMergeJoin ou causando Driver Out-Of-Memory (OOM)
+| # | Passo | Onde olhar | Sinal a procurar | O que decide |
+| :-- | :-- | :-- | :-- | :-- |
+| 1 | **Baseline: o que é diferente entre a execução boa e a ruim?** | Histórico de execuções do Job (duração por tarefa), versão do Runtime, configuração do cluster, tamanho da entrada, `DESCRIBE DETAIL` e `DESCRIBE HISTORY` da dimensão | Entrada muito maior, dimensão com muito mais linhas/versões, Runtime ou configuração diferentes, outro job no mesmo cluster | Aponta o domínio (dados, ambiente ou infraestrutura) antes de abrir a Spark UI |
+| 2 | **Métricas do cluster e event log** | Aba de métricas do cluster (CPU, memória, rede, disco) e event log (`RESIZING`, `NODES_LOST`, `DRIVER_NOT_RESPONDING`) | O autoscaling chegou a 8 workers? Nós perdidos (spot)? CPU **baixa** durante um job longo? | CPU baixa por horas indica gargalo serial (skew ou trabalho no driver); CPU/memória saturadas indicam capacidade ou *spill* |
+| 3 | **Spark UI, Jobs e Stages: onde está o tempo?** | Linha do tempo de jobs e a lista de stages ordenada por duração | Um ou poucos stages concentram quase todo o tempo? Há **lacunas** entre jobs (trabalho do driver)? Jobs iniciais lendo toda a entrada (inferência de schema)? | Isola o(s) stage(s) responsáveis, para não otimizar o que não importa |
+| 4 | **Detalhe do stage lento: distribuição das tasks** | *Summary Metrics* do stage: duração min/mediana/máx, *Spill* (memória e disco), *GC Time*, *Shuffle Read Size*; tasks com retentativa | Máx ≫ mediana (skew). *Spill* em quase todas as tasks (partições grandes demais). GC > 10–20% do tempo (pressão de memória). *Fetch failures* (nós perdidos) | Distingue skew (poucas tasks) de sobrecarga geral (todas as tasks) |
+| 5 | **Plano de execução e aba SQL** | `df.explain("formatted")`, aba SQL/DataFrame (plano final do AQE), Query Profile | Estratégia do join (`BroadcastHashJoin` vs `SortMergeJoin`); métricas do `BroadcastExchange` (tamanho e tempo); nº de linhas **antes e depois** do join; arquivos lidos | Confirma H1 e H4 e revela o custo do shuffle |
+| 6 | **Logs do driver** | Log4j/driver logs | `BroadcastTimeoutException`, `OutOfMemoryError`, pausas longas de GC | Mostra se o broadcast está sobrecarregando o driver |
+| 7 | **Perfil dos dados** | Consultas de distribuição de chaves, tamanho e nº de arquivos | Chaves quentes; muitos arquivos pequenos; chaves duplicadas na dimensão | Fornece a causa, não só o sintoma |
+| 8 | **Experimento controlado** | Mesmo job sobre uma amostra ou um dia, mudando **uma variável** por vez | A duração muda ao remover o `broadcast()`, filtrar `is_current`, etc.? | Prova causal antes de alterar produção |
 
-## 5. Hipoteses para a degradação
-### 5.1. Falha no Broadcast Join
+**Regra de ouro:** só mudar configuração depois de saber em qual stage e por que o tempo é gasto. Adicionar workers às cegas custa mais e, se a causa for skew, **não reduz o tempo** (a tarefa lenta continua sendo uma só).
 
-   * O enunciado menciona que a tabela cadastro_fornecedores cresceu bastante.
+---
 
-   * Se a tabela superou o limite de broadcast (padrão de 10 MB), o Spark altera a estratégia para SortMergeJoin ou Shuffle Hash Join. Isso introduz uma etapa massiva de Shuffle que não existia anteriormente.
+## 2. Hipóteses mais prováveis (em ordem)
 
-   * Se o otimizador (ou o código) continuou forçando o broadcast() de uma tabela que ficou gigante, a tabela inteira foi enviada do Driver para todos os Executors, causando uso excessivo de memória, picos brutais de GC e gravação excessiva em disco.
+### H1 — O broadcast join deixou de funcionar como antes porque a dimensão cresceu
 
-### 5.2. Data Skew nas Transformações Wide
+**Raciocínio.** O broadcast join só compensa quando o lado pequeno é realmente pequeno: ele é coletado no driver e replicado em **todos** os executores, então o custo cresce com o tamanho da tabela **e** com o número de nós. Ao crescer, dois cenários são possíveis:
 
-   * Raciocínio: O dataset de sensores costuma crescer de forma desigual (ex.: um sensor com defeito enviando milhões de eventos, ou concentração de eventos em um único timestamp ou fornecedor_id).
+1. **Sem `broadcast()` explícito:** a tabela passa do limite (padrão de 10 MB no Spark; o Databricks usa limiares próprios com o AQE, então confira no seu Runtime) e o Spark troca para **SortMergeJoin**. Isso exige embaralhar e ordenar a tabela **grande** de sensores, que antes não se movia. É a explicação mais direta para 40 min virar horas: um shuffle completo do lado maior.
+2. **Com `broadcast()` forçado:** o hint prevalece sobre o limite. A tabela inteira passa pelo driver e é enviada a todos os executores, gerando pressão de memória e GC, lentidão no `BroadcastExchange` e o risco de `BroadcastTimeoutException` (`spark.sql.broadcastTimeout`, padrão de 300 s) ou de estouro de memória. Há ainda um limite rígido de 8 GB por tabela em broadcast.
 
-   * Como o pipeline faz múltiplas transformações wide (operações com Shuffle como groupBy, join ou dropDuplicates), dados agrupados pela mesma chave serão enviados para a mesma partição.
+**Como confirmar.** No plano, procure `SortMergeJoin` precedido de `Exchange` na tabela de sensores (cenário 1), ou um `BroadcastExchange` com "data size" grande e tempo de coleta alto (cenário 2). Nos logs do driver, procure exceções de broadcast. O tamanho **em disco** (comprimido) subestima o tamanho em memória, então meça o tamanho real no `BroadcastExchange`.
 
-   * Se 99% das tarefas terminam em segundos e 1 tarefa fica travada por horas processando a chave desproporcional, o job inteiro fica retido aguardando essa tarefa.
+### H2 — Data skew nas transformações *wide*
 
-## 6. Otimizações Concretas e Ações de Mitigação
+**Raciocínio.** `groupBy`, `join` e `dropDuplicates` enviam todas as linhas de uma mesma chave para a mesma partição. Dados de sensores são naturalmente desiguais: um sensor com defeito pode enviar milhões de leituras, e picos concentram eventos em poucos timestamps. Sem mudança de código, a **distribuição** dos dados pode ter mudado. O stage só termina quando a **última** tarefa termina, então uma partição desproporcional segura o job inteiro (o gargalo serial descrito na seção 0). O crescimento é pior que linear, porque uma partição grande também vira *spill* em disco.
 
-### 6.1. Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+**Como confirmar.** No stage lento, duração máxima muito maior que a mediana, uma task com *Shuffle Read Size* e *Spill* muito acima das demais, e cluster com CPU ociosa (o autoscaling não ajuda). Consulta de apoio:
 
-   * Converter arquivos raw para Delta/Parquet: Se o sensores_iot.json é lido em formato texto cru, usar o Auto Loader (cloudFiles) para ingerir em Delta Lake com suporte a file notification.
+```sql
+SELECT chave, COUNT(*) AS linhas,
+       ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS pct_do_total
+FROM sensores           -- tabela/DF de entrada
+GROUP BY chave          -- sensor_id ou a chave do join/agrupamento
+ORDER BY linhas DESC
+LIMIT 20;
+```
 
-   * Compactação de arquivos pequenos (Small Files Problem): Executar um OPTIMIZE na tabela de fornecedores para juntar múltiplos arquivos pequenos em arquivos maiores de 1GB, reduzindo as chamadas de API ao storage.
+### H3 — Volume maior sobre configuração estática
 
-### 6.2. Problema: Degradação de I/O de armazenamento ou rede (Storage/Network Throttle)
+**Raciocínio.** Com mais dados, configurações que eram adequadas deixam de ser:
 
-   * Reduzir o uso da Heap para cache: Reajustar a fração de memória usada para execução e armazenamento via spark.memory.fraction ou evitar usar .cache() em grandes conjuntos de dados desnecessariamente
+- **Partições de shuffle fixas** (padrão de 200): com volume maior cada partição fica grande demais, não cabe na memória e faz *spill* para disco. O AQE consegue **reduzir** partições, mas não aumentar o número inicial.
+- **JSON sem schema explícito:** `spark.read.json` sem `.schema()` faz uma **passagem extra sobre todos os arquivos** para inferir o schema. Esse custo cresce linearmente com os dados, sem que o código mude.
+- **Muitos arquivos pequenos ou `multiLine`:** listagem e overhead por tarefa crescem; JSON `multiLine` não é divisível, então cada arquivo vira uma tarefa e arquivos maiores viram stragglers.
 
-### 6.3. Problema: Data Skew 
+**Como confirmar.** *Spill* em quase todas as tasks e GC alto. Jobs iniciais lendo toda a entrada sem produzir saída (inferência de schema). Número e tamanho médio dos arquivos lidos na aba SQL.
 
-   * Mitigação Automática com AQE Skew Join: Habilitar o tratamento automático de assimetria do Spark:
+### H4 — Fan-out por dimensão histórica (SCD Tipo 2)
 
-      Exemplos de configurações:
-      * Habilita a execução adaptativa de consultas:
-         spark.conf.set("spark.sql.adaptive.enabled", "true")
+**Raciocínio.** A dimensão de fornecedores guarda **todas as versões**. Um join apenas pela chave, sem filtrar a versão (`is_current`) nem usar intervalo de vigência, devolve **uma linha por versão**. À medida que a dimensão acumula histórico, o resultado do join se multiplica: mais linhas, mais shuffle e, além da lentidão, **resultados duplicados**. Isso também faz a dimensão crescer e piorar H1.
 
-      * Converte dinamicamente SortMergeJoin em BroadcastJoin se a tabela filtrada for pequena:
-         spark.conf.set("spark.sql.adaptive.autoBroadcastJoinThreshold.enabled", "true")
+**Como confirmar.** No plano, o número de linhas de saída do join é **maior** que o da tabela de sensores. Comparar a contagem final com a de uma execução anterior. Conferir chaves repetidas na dimensão:
 
-      * Trata DATA SKEW automaticamente dividindo partições grandes em sub-partições:
-         spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
-         spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
-         spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "256MB")
+```sql
+SELECT fornecedor_id, COUNT(*) AS versoes
+FROM prod_financeiro.silver.dim_fornecedores
+GROUP BY fornecedor_id
+ORDER BY versoes DESC
+LIMIT 20;
+```
 
-      * Consolida partições pequenas de Shuffle automaticamente:
-         spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+### H5 — Infraestrutura: autoscaling, nós perdidos ou concorrência
 
-   * Técnica Manual de Salting: Se a chave do groupBy ou join estiver muito concentrada (ex.: um único sensor_id tem 80% das leituras), acrescente uma coluna de "sal" aleatório para quebrar o dado em múltiplas partições antes da operação wide.
+**Raciocínio.** O autoscaling reage com atraso, então um job que precisa de 8 workers desde o início pode passar um bom tempo com 2. Nós spot perdidos forçam a recomputação de partições de shuffle (*fetch failures*), e outro job no mesmo cluster disputa CPU e memória. Sozinha, essa hipótese raramente explica 6x, mas **amplifica** as anteriores.
 
-### 6.4. Estratégia de Particionamento, Reparticionamento e Caching
+**Como confirmar.** Event log do cluster (`RESIZING`, `NODES_LOST`), tasks com retentativas, e utilização do cluster antes e durante o job.
 
-   * Evitar repartition() desnecessário: Se o pipeline faz repartition() sem necessidade antes das transformações wide, substitua por coalesce() quando apenas reduzir partições.
+### H6 (condicional) — Estado crescente, se o job for streaming
 
-   * Ajuste de Partições de Shuffle (spark.sql.shuffle.partitions): O valor padrão (200) pode ser pequeno para o novo volume. Com AQE habilitado, pode-se definir um número inicial maior (ex.: 800), e o Spark reduzirá automaticamente se necessário.
+Se o pipeline fosse Structured Streaming, um `dropDuplicates` sem watermark manteria o estado para sempre e degradaria com o tempo (ver Parte 2). Acompanhe `numRowsTotal` no `stateOperators` do `lastProgress`.
 
-   * Uso consciente de Caching: Se a tabela cadastro_fornecedores ou o dataset intermediário de sensores for reutilizado múltiplas vezes no mesmo DAG, faça o .persist(StorageLevel.MEMORY_AND_DISK) e lembre-se de dar .unpersist() ao final do job.
+### Do sintoma à hipótese
 
-<small><a href="#indice">⬆️ Voltar ao topo</a></small>
+| O que se observa | Hipótese | Ação principal |
+| :-- | :-- | :-- |
+| `SortMergeJoin` com `Exchange` na tabela de sensores | H1 | Reduzir a dimensão para voltar ao broadcast |
+| `BroadcastExchange` grande/lento, `BroadcastTimeoutException` | H1 | Remover o hint, encolher a dimensão |
+| 1 task com tempo e *spill* muito acima da mediana; CPU ociosa | H2 | Tratar o skew (seção 3.2) |
+| *Spill* e GC altos em quase todas as tasks | H3 | Ajustar partições de shuffle e a leitura |
+| Job inicial lendo tudo sem gerar saída | H3 | Schema explícito |
+| Linhas após o join > linhas de entrada | H4 | Filtrar a versão ou usar join temporal |
+| Nós perdidos / muitos resizes no event log | H5 | Ajustar o cluster |
+
+---
+
+## 3. Otimizações concretas
+
+### 3.1 Reduzir a dimensão antes do join (H1, H4)
+
+Antes de qualquer configuração, **diminuir o que é enviado no broadcast**: só a versão corrente, só as colunas necessárias, sem duplicidade de chave. Isso costuma devolver a tabela ao tamanho de broadcast e ainda elimina o fan-out.
+
+```python
+from pyspark.sql import functions as F
+
+dim_atual = (
+    spark.table("prod_financeiro.silver.dim_fornecedores")
+    .where("is_current")                                  # uma versão por fornecedor
+    .select("fornecedor_id", "nome", "status_contratual")  # sem dados_bancarios: mais leve e mais seguro
+)
+
+resultado = sensores.join(F.broadcast(dim_atual), "fornecedor_id", "left")
+```
+
+- Se o negócio precisar da versão **vigente na data da leitura** (join temporal), use `valid_from <= ts < valid_to`. Em joins por intervalo, considere a dica `RANGE_JOIN` do Databricks.
+- Atualize as estatísticas para que o otimizador decida com dados reais: `ANALYZE TABLE prod_financeiro.silver.dim_fornecedores COMPUTE STATISTICS`.
+
+### 3.2 Revisar a estratégia de join e o *threshold* de broadcast (H1)
+
+- **Não aumentar o limite às cegas.** Broadcast custa memória no driver **e** em cada executor. Meça o tamanho real (`BroadcastExchange`, aba SQL) e só então ajuste, com folga em relação à memória disponível.
+- Se a dimensão reduzida continuar grande, **remova o `broadcast()` explícito** e deixe o AQE decidir com estatísticas de runtime (ele pode converter um `SortMergeJoin` em broadcast quando o lado real for pequeno).
+- Quando o broadcast for inviável, a alternativa é o *shuffle hash join* (`.hint("shuffle_hash")`), que evita ordenar o lado grande, ou manter o `SortMergeJoin` com o tratamento de skew abaixo.
+
+```python
+# Só depois de medir; valor ilustrativo
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", 100 * 1024 * 1024)
+```
+
+### 3.3 Tratar data skew (H2)
+
+1. **Identificar as chaves quentes** (consulta da seção 2, H2).
+2. **AQE `skewJoin`:** divide automaticamente partições enormes **em joins**. Ele **não** resolve skew de `groupBy` nem de `dropDuplicates`.
+3. **Agregações: agregação em duas fases com *salting*** (vale para agregações decomponíveis: soma, contagem, mínimo, máximo; a média vira soma/contagem):
+
+```python
+N_SALT = 16
+parcial = (
+    df.withColumn("salt", (F.rand() * N_SALT).cast("int"))
+      .groupBy("sensor_id", "janela", "salt")
+      .agg(F.sum("valor").alias("soma"), F.count("*").alias("n"))
+)
+final = (
+    parcial.groupBy("sensor_id", "janela")
+           .agg(F.sum("soma").alias("soma"), F.sum("n").alias("n"))
+)
+```
+
+4. **Chaves quentes em separado:** processar as poucas chaves dominantes por um caminho próprio (com broadcast) e o restante pelo caminho normal, unindo os resultados.
+5. **Atacar a origem:** um sensor com defeito enviando milhões de leituras deve ser detectado e limitado antes (regra de qualidade/quarentena), em vez de sobrecarregar o pipeline.
+
+### 3.4 AQE: verificar, ajustar e corrigir o que é comum errar
+
+O AQE já vem **ligado por padrão** no Databricks e nas versões recentes do Spark, então o passo é **verificar** a configuração e **ajustar** o que faz diferença. Os nomes corretos:
+
+| Configuração | Papel | Nota |
+| :-- | :-- | :-- |
+| `spark.sql.adaptive.enabled` | Liga o AQE | Padrão: ligado. Conferir com `spark.conf.get`. |
+| `spark.sql.adaptive.coalescePartitions.enabled` | Reduz partições de shuffle pequenas | Padrão: ligado. |
+| `spark.sql.adaptive.advisoryPartitionSizeInBytes` | Tamanho-alvo por partição após o shuffle (padrão 64 MB) | Ajustar se as partições ficarem grandes ou pequenas demais. |
+| `spark.sql.adaptive.skewJoin.enabled` | Trata skew **em joins** | Padrão: ligado. |
+| `spark.sql.adaptive.skewJoin.skewedPartitionFactor` / `skewedPartitionThresholdInBytes` | Definem quando uma partição é "skewed" (padrão 5x a mediana e 256 MB) | Reduzir para tratar skew mais cedo. |
+| `spark.sql.adaptive.autoBroadcastJoinThreshold` | Limite de broadcast em tempo de execução | Se não definido, usa `spark.sql.autoBroadcastJoinThreshold`. |
+
+Não existe `spark.sql.adaptive.autoBroadcastJoinThreshold.enabled`: é comum encontrar essa "configuração" em textos gerados por IA. Habilitar configurações que já são o padrão não é uma otimização; o ganho vem de **medir e ajustar** os limiares.
+
+### 3.5 Particionamento, leitura e formato (H3)
+
+- **Partições de shuffle:** com volume maior, comece com um número maior e deixe o AQE reduzir; no Databricks, considere o shuffle auto-otimizado (`spark.sql.shuffle.partitions = auto`, conferindo o suporte no seu Runtime).
+- **Schema explícito no JSON**, ou Auto Loader com `schemaLocation`, para eliminar a passagem extra de inferência.
+- **Converter o JSON bruto em Delta** (Bronze, Partes 1 e 2): formato colunar, estatísticas e *data skipping*, e arquivos compactados por `OPTIMIZE`, com Liquid Clustering pela chave de consulta. Evite `multiLine` quando o formato permitir uma linha por registro.
+- **Paralelismo de leitura:** `spark.sql.files.maxPartitionBytes` (padrão 128 MB) controla o tamanho das partições de entrada.
+
+### 3.6 Caching (com critério)
+
+- **Vale** persistir a dimensão reduzida, ou um intermediário **pequeno** reutilizado várias vezes no mesmo job (`persist(StorageLevel.MEMORY_AND_DISK)` e `unpersist()` no final).
+- **Não vale** cachear a tabela grande de sensores: consome memória, provoca *spill* e só ajuda se for lida várias vezes.
+- Para leituras repetidas de tabelas Delta, o cache de disco do Databricks (em instâncias com SSD local) costuma ser preferível ao `cache()` do Spark.
+
+### 3.7 Cluster e autoscaling (H5)
+
+- Um job com SLA previsível é melhor em um **cluster de job dedicado**, sem concorrência.
+- Se o job for lento nos primeiros minutos por causa do autoscaling, aumente o mínimo de workers (a diferença de custo costuma ser menor que o ganho de tempo).
+- Instâncias com mais memória por núcleo reduzem *spill* em jobs de shuffle pesado; dimensione o **driver** para o tamanho do broadcast e considere o Photon.
+- **Prioridade:** primeiro corrija a causa (seções 3.1 a 3.5). Mais workers só ajudam se o gargalo for capacidade, não skew.
+
+---
+
+## 4. Correção estrutural: tornar o job incremental
+
+A causa de fundo de "o job piora sempre que os dados crescem" é que ele **reprocessa todo o histórico** a cada execução. Um pipeline **incremental** (Bronze com Auto Loader e Silver com `foreachBatch` + MERGE, como na Parte 2) processa apenas os dados novos, e a duração passa a depender do volume **novo**, não do acumulado. As otimizações acima recuperam a performance; o incremental impede que o problema volte.
+
+---
+
+## 5. Como validar a melhoria e evitar recorrência
+
+**Comparação antes/depois (mesma entrada):**
+
+| Métrica | Antes | Depois |
+| :-- | :-- | :-- |
+| Duração total | | |
+| Shuffle read/write (GB) | | |
+| *Spill* em disco (GB) | | |
+| Razão duração máx / mediana das tasks (skew) | | |
+| GC (% do tempo) | | |
+| Estratégia do join (plano) | | |
+| Custo (DBUs) | | |
+
+**Prevenção:**
+
+- **Alerta de regressão de duração** no Job (por exemplo, 2x a mediana das últimas execuções).
+- **Monitorar o crescimento** da dimensão (linhas, versões por fornecedor, tamanho) e de arquivos por tabela.
+- **Teste de plano** no CI: verificar que o `explain` do job contém `BroadcastHashJoin` após a redução da dimensão, para detectar quando o join volta a mudar de estratégia.
+- **Checagem de skew** nos dados de entrada (percentual da chave mais frequente) com alerta acima de um limiar.
 
 ---
 
