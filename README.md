@@ -150,7 +150,7 @@ flowchart LR
 
 ---
 
-# 3. Formato de armazenamento e particionamento
+## 3. Formato de armazenamento e particionamento
 
 **Formato:** Delta Lake em todas as camadas, como tabelas gerenciadas do Unity Catalog. O Delta dá transações ACID (leitores nunca veem estado parcial), `MERGE` idempotente, time travel e Change Data Feed. O Unity Catalog com *predictive optimization* automatiza `OPTIMIZE` e `VACUUM` quando habilitada.
 
@@ -497,14 +497,152 @@ No `lastProgress` do stream, acompanhe `stateOperators[0].numRowsTotal` (o estad
 
 # Parte 3 — SQL Avançado
 
-## 1. Moinhos com Maior Queda Percentual de Produção Mês a Mês (Últimos 6 Meses)
-   Esta consulta calcula a produção consolidada por mês/moinho, busca o valor do mês anterior através da função de janela LAG(), calcula a variação percentual e identifica os 3 moinhos com a maior queda percentual no período.
+Arquivos (em `src/parte-3/`):
 
-## 2. Detecção de Anomalias de Produção (Média Móvel e Desvio Padrão de 7 Dias)
-   Esta consulta analisa a série temporal diária por moinho e calcula a média móvel e o desvio padrão dos últimos 7 dias (sem incluir o próprio dia do evento, evitando contaminação do cálculo pelo pico de anomalia).
+| Arquivo | Consulta |
+| :-- | :-- |
+| `01_maior_queda_mensal.sql` | Top 3 moinhos com maior queda percentual mês a mês (últimos 6 meses) |
+| `02_anomalias_media_movel.sql` | Dias que ultrapassam 2 desvios-padrão da média móvel de 7 dias |
+| `03_integridade_referencial_fornecedores.sql` | Eventos SAP com fornecedor inexistente, agrupados por mês |
 
-## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
-   Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
+## Premissas e mapeamento de nomes
+
+As consultas usam os nomes do enunciado. Elas se conectam à arquitetura assim:
+
+| Nome na consulta | Tabela da arquitetura (Partes 1 e 2) | Observação |
+| :-- | :-- | :-- |
+| `silver.producao` | `prod_operacoes.silver.producao` | A coluna `data` corresponde a `data_producao_date` (tipo `DATE`, em UTC). |
+| `silver.eventos_sap` | `prod_financeiro.silver.eventos_sap` | `data` é a data do lançamento. |
+| `silver.dim_fornecedores` | `prod_financeiro.silver.dim_fornecedores` | É o `cadastro_fornecedores` do enunciado, já como SCD Tipo 2. |
+
+Para rodar sobre as tabelas reais, crie *views* de compatibilidade ou substitua os nomes:
+
+```sql
+CREATE OR REPLACE VIEW silver.producao AS
+SELECT planta_id, moinho_id, data_producao_date AS data, toneladas_produzidas
+FROM prod_operacoes.silver.producao;
+```
+
+Outras premissas:
+
+- `data` é do tipo `DATE`. Se for `TIMESTAMP`, aplique `CAST(data AS DATE)`.
+- A Silver de produção **não tem duplicatas nem `toneladas_produzidas` nulo**, porque a Parte 2 deduplica e envia nulos para a quarentena. Assim, `SUM` por mês é completo, e a quantidade de registros em quarentena precisa ser acompanhada, pois ela é dado que falta nessas somas.
+- A tabela de produção só tem produção. Para "consumo" (consulta 2), o padrão é o mesmo, trocando a métrica e a tabela.
+
+---
+
+## Consulta 1 — Maiores quedas percentuais mês a mês
+
+**Interpretação:** para cada moinho, considera-se a **pior queda mensal** dentro dos últimos 6 meses. Os moinhos são ranqueados por essa queda e os 3 primeiros são retornados. Outras leituras possíveis (queda média, queda entre o primeiro e o último mês) exigem trocar apenas a métrica do ranking.
+
+### Como funciona
+
+1. **`parametros`:** define o mês corrente. A janela termina no **último mês completo**.
+2. **`calendario`:** gera 7 meses completos (1 mês-base + 6 avaliados) com `sequence`.
+3. **`serie`:** cruza cada moinho com cada mês do calendário. Sem linhas em um mês, a produção é 0.
+4. **`variacao`:** `LAG` traz a produção do mês anterior, por `(planta_id, moinho_id)`.
+5. **`quedas`:** calcula `(anterior − atual) / anterior × 100`, mantendo só quedas reais.
+6. **`pior_mes_por_moinho` e `ranking`:** dois `ROW_NUMBER`. O primeiro escolhe o pior mês de cada moinho, e o segundo ordena os moinhos.
+
+### Decisões e o problema que cada uma evita
+
+| Decisão | Problema evitado |
+| :-- | :-- |
+| Excluir o mês corrente | Um mês parcial comparado a um mês cheio produz uma "queda" falsa gigantesca. |
+| Filtro em início de mês (`add_months(mes_corrente, -7)`) e não `ADD_MONTHS(CURRENT_DATE(), -6)` | Cortar no meio do mês deixa o primeiro mês da janela parcial. |
+| Calendário de meses (sem buracos) | Sem ele, se um moinho não tem nenhuma linha em um mês, o `LAG` compara com **dois meses atrás** e esconde a parada. |
+| Chave `(planta_id, moinho_id)` | O mesmo `moinho_id` pode existir em plantas diferentes; agrupar só por `moinho_id` mistura moinhos distintos. |
+| `toneladas_mes_anterior > 0` | Evita divisão por zero e crescimento "infinito" na partida de um moinho. |
+| `toneladas < toneladas_mes_anterior` | Sem esse filtro, moinhos que só cresceram apareceriam no top 3 se poucos moinhos tivessem queda. |
+| `ROW_NUMBER` com desempate por `planta_id, moinho_id` | Garante exatamente 3 linhas e resultado determinístico. Para incluir empates, use `RANK`. |
+
+**Semântica assumida:** mês sem nenhum registro conta como produção 0 (moinho parado). Se ausência de registro significar "dado não recebido" em vez de "parado", essa regra gera falsos alertas de 100% de queda e deve ser revista com o negócio.
+
+**Desempenho:** o filtro por `data` aproveita o Liquid Clustering da Silver (`data_producao_date`). O calendário multiplica apenas por 7 meses, então o custo extra é desprezível.
+
+---
+
+## Consulta 2 — Anomalias com média móvel de 7 dias
+
+**Regra:** um dia é anômalo quando `|produção − média_7d| > 2 × desvio_7d`, em que média e desvio usam os **7 dias corridos anteriores**, sem incluir o próprio dia.
+
+### Como funciona
+
+1. **`producao_diaria`:** consolida registros do mesmo dia e cria `dia_num` (número do dia), para permitir um `RANGE` numérico.
+2. **`estatisticas`:** `AVG`, `STDDEV_SAMP` e `COUNT` sobre a janela `RANGE BETWEEN 7 PRECEDING AND 1 PRECEDING`.
+3. **Filtro final:** aplica o limiar de 2 desvios e as guardas.
+
+### Decisões
+
+| Decisão | Motivo |
+| :-- | :-- |
+| Janela **exclui o próprio dia** | Se o pico entrasse na média e no desvio, ele inflaria o limite e mascararia a si mesmo. |
+| **`RANGE` sobre o número do dia**, não `ROWS` | Com dias faltando na série, `ROWS BETWEEN 7 PRECEDING` abrangeria mais de 7 dias de calendário. O `RANGE` numérico usa dias corridos e dispensa um calendário auxiliar. |
+| `STDDEV_SAMP` (amostral) | A janela é uma amostra dos dias, não a população inteira. |
+| Anomalia **nos dois sentidos** (`ACIMA` / `ABAIXO`) | Uma queda brusca de produção é tão relevante quanto um pico. Para a leitura estritamente literal do enunciado ("ultrapassa"), filtre `tipo_anomalia = 'ACIMA'`. |
+| `dias_na_janela >= 5` | Com poucos pontos, o desvio é ruído. O limite é parametrizável em `parametros`. |
+| `desvio_7d > 0` | Com desvio 0, qualquer variação mínima seria "anômala". Limitação: uma produção constante que muda de repente não é sinalizada; uma tolerância absoluta mínima resolveria, se o negócio quiser. |
+
+**Saída:** além do dia, mostra média, desvio, limites inferior e superior e `z_score`, para que quem investiga veja o tamanho do desvio.
+
+**Desempenho:** a consulta varre todo o histórico. Em produção, restrinja a um período recente (mantendo 7 dias de folga para a janela) ou materialize a saída em uma tabela Gold atualizada de forma incremental.
+
+---
+
+## Consulta 3 — Integridade referencial de fornecedores
+
+Contém três consultas: **3a** (a pedida no enunciado), **3b** (informativa) e **3c** (opcional).
+
+### 3a — Fornecedor inexistente, por mês
+
+`NOT EXISTS` sobre a chave normalizada, agrupando por `trunc(data, 'MM')`. Retorna, por mês: registros órfãos, documentos afetados, fornecedores inexistentes, valor total afetado e até 5 exemplos de `fornecedor_id` para triagem.
+
+| Decisão | Motivo |
+| :-- | :-- |
+| "Existe" = chave em **qualquer versão** da dimensão | Filtrar `is_current = true` mediria o estado de hoje, e não a integridade da chave. |
+| **`NOT EXISTS`**, não `NOT IN` | `NOT IN` retorna **zero linhas** se a subconsulta tiver um `NULL`, e o problema passaria despercebido. |
+| FK nula **não** é violação | Um evento sem fornecedor não referencia ninguém. Ele é reportado à parte (3b), pois pode ser um lançamento legítimo sem fornecedor ou um problema de extração. |
+| Normalização da chave nos dois lados (conversão ALPHA do SAP) | Zeros à esquerda (`'0000012345'` vs `'12345'`) são causa clássica de falso órfão. A Silver já normaliza; aqui é uma defesa. Para auditar divergências de formato em vez de mascará-las, remova a normalização. |
+| `COUNT(DISTINCT bukrs, belnr)` | `BELNR` só é único por empresa (e ano fiscal, `GJAHR`, se a tabela o tiver; nesse caso inclua-o). |
+
+### 3b — Eventos sem fornecedor (informativo)
+
+Contagem e valor de eventos com `fornecedor_id` nulo ou em branco, por mês. Serve para dimensionar o que ficou fora da 3a.
+
+### 3c — Validade temporal (opcional)
+
+Detecta eventos cujo fornecedor existe, mas **não estava vigente na data do evento**, usando o intervalo semiaberto `[valid_from, valid_to)` da dimensão SCD2.
+
+**Cuidado:** só é confiável se `valid_from` refletir a **vigência de negócio** (a coluna `data_atualizacao`, como na Parte 2). Se a dimensão foi carregada usando a data do snapshot como vigência, todo evento anterior ao primeiro snapshot será sinalizado. Por isso esta consulta é opcional.
+
+**Desempenho:** a dimensão é pequena, então o `NOT EXISTS` vira um anti-join com broadcast. O filtro por mês aproveita o clustering de `eventos_sap`.
+
+---
+
+## Cenários que o dataset sintético deve cobrir
+
+Cada caso tem um resultado esperado conhecido, o que transforma a execução em evidência de que a consulta está correta.
+
+| Consulta | Cenário | Resultado esperado |
+| :-- | :-- | :-- |
+| 1 | Moinho com queda de 50% em um mês | Aparece no top 3 com 50% |
+| 1 | Moinho com um mês sem nenhum registro | Queda de 100% nesse mês |
+| 1 | Registros no mês corrente (parcial) | Ignorados |
+| 1 | Mesmo `moinho_id` em duas plantas | Tratados como moinhos distintos |
+| 1 | Mês com todas as toneladas nulas | Não gera comparação |
+| 1 | Moinho que só cresce | Não aparece |
+| 2 | Pico e queda brusca em série estável | Ambos sinalizados (`ACIMA` e `ABAIXO`) |
+| 2 | Dias faltando na série | Janela continua em 7 dias corridos |
+| 2 | Produção constante | Nenhum alerta (desvio 0) |
+| 2 | Menos de 5 dias de histórico | Nenhum alerta |
+| 3 | Fornecedor `'0000012345'` no evento e `'12345'` na dimensão | Não é órfão |
+| 3 | Fornecedor com todas as versões encerradas | Não é órfão (3a) |
+| 3 | Fornecedor inexistente em dois meses diferentes | Uma linha por mês na 3a |
+| 3 | `fornecedor_id` nulo ou em branco | Fora da 3a, contado na 3b |
+| 3 | Mesmo `belnr` em duas empresas | Contados como documentos distintos |
+
+---
+
 
    <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/silver.eventos_sap.sql" target="_blank">Codigo SQL para os 3 topicos</a>
 
