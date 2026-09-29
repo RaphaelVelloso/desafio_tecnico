@@ -16,20 +16,76 @@
 
 <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-1/diagrama_arquitetura.md" target="_blank">Diagrama Arquitetura</a>
 
-| Camada | Fonte / Dataset | SLA / Frequência | Estratégia de Ingestão | Formato & Particionamento | Tratamento & Schema Evolution | Governança (Unity Catalog) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Bronze** (Raw) | `sensores_iot.json` | Near Real-Time | Streaming via Auto Loader (`cloudFiles`) | Delta Lake<br/>*Sem particionamento* | Ingestão append-only dos JSONs brutos com `schemaEvolutionMode = "addNewColumns"`. | `datascience_catalog` (Read)<br/>`operacoes_catalog` (Read) |
-| **Bronze** (Raw) | `producao_moinhos.csv` | Diário / Intra-diário | Incremental Batch via Auto Loader | Delta Lake<br/>*Sem particionamento* | Suporta alteração de schema (`planta_id` / `id_planta`) usando `mergeSchema = true`. | `operacoes_catalog` (Read) |
-| **Bronze** (Raw) | `cadastro_fornecedores.csv` | Diário / Semanal | Batch (Snapshot Incremental) | Delta Lake<br/>*Sem particionamento* | Ingestão full ou incremental do cadastro mestre bruto. | `financeiro_catalog` (Read) |
-| **Bronze** (Raw) | `eventos_sap.csv` | Mensal (Fechamento) | Scheduled Batch via Workflows | Delta Lake<br/>*Sem particionamento* | Ingestão dos lançamentos brutos vindos do ERP legado (SAP ECC-like). | `financeiro_catalog` (Read) |
-| **Silver** (Conformed) | `sensores_iot` | Minutos (Streaming) | Stream-to-Stream Processing | Delta Lake<br/>Partição: `data` (`YYYY-MM-DD`)<br/>*Z-Order / Liquid Clustering por `sensor_id`, `planta_id`* | Limpeza, parsing do JSON, deduplicação com `watermark` + `dropDuplicates(["sensor_id", "timestamp"])`. | `operacoes_catalog.silver`<br/>`datascience_catalog.silver` |
-| **Silver** (Conformed) | `producao_moinhos` | Diário / Intra-diário | Batch Incremental / Append | Delta Lake<br/>Partição: `ano_mes` | Filtro de nulos em `toneladas_produzidas`, conversão de fuso para UTC, e harmonização de schema via `coalesce(planta_id, id_planta)`. | `operacoes_catalog.silver`<br/>`datascience_catalog.silver` |
-| **Silver** (Conformed) | `dim_fornecedores` | Diário / Semanal | Batch MERGE INTO | Delta Lake<br/>*Sem particionamento* | Implementação de **SCD Tipo 2** para preservação do histórico de alterações (`is_current`, `start_date`, `end_date`). | `financeiro_catalog.silver` |
-| **Silver** (Conformed) | `eventos_sap` | Mensal | Batch Incremental | Delta Lake<br/>Partição: `ano_mes` | Validação de integridade referencial com fornecedores, padronização de chaves (`bukrs`, `belnr`, `matnr`). | `financeiro_catalog.silver` |
-| **Gold** (Business) | `dash_operacao_sensores` | Near Real-Time | Streaming / Batch Agregado | Delta Lake<br/>*Liquid Clustering: `planta_id`* | Métricas consolidadas de telemetria e alertas operacionais para a planta. | `operacoes_catalog.gold` (Full) |
-| **Gold** (Business) | `produtividade_plantas` | Diário / Mensal | Batch Agregado | Delta Lake<br/>*Liquid Clustering: `planta_id`, `mes`* | Indicadores consolidados de toneladas produzidas por moinho/planta para tomada de decisão. | `operacoes_catalog.gold` (Full) |
-| **Gold** (Business) | `relatorios_financeiros_sap` | Mensal | Scheduled Batch | Delta Lake<br/>Partição: `ano_mes` | Relatórios consolidados de fechamento contábil e auditoria financeira. | `financeiro_catalog.gold` (Full) |
-| **Gold** (Business) | `feature_store_ds` | Semanal / Sob Demanda | Batch ETL | Delta Lake<br/>*Liquid Clustering: `sensor_id`, `planta_id`* | Matriz de features consolidadas para modelos preditivos e Machine Learning. | `datascience_catalog.feature_store` |
+```mermaid
+flowchart LR
+    subgraph SRC["Fontes"]
+        S1["sensores_iot.json<br/>JSON aninhado, fluxo continuo"]
+        S2["producao_moinhos.csv<br/>lotes diarios / intra-diarios"]
+        S3["cadastro_fornecedores.csv<br/>snapshot periodico"]
+        S4["eventos_sap.csv<br/>extracao do ERP SAP ECC"]
+    end
+
+    LZ[("Landing Zone<br/>External Location<br/>arquivos imutaveis")]
+
+    subgraph BRONZE["BRONZE - append-only, fonte da verdade"]
+        B1["prod_operacoes.bronze.sensores_iot"]
+        B2["prod_operacoes.bronze.producao_moinhos"]
+        B3["prod_financeiro.bronze.cadastro_fornecedores"]
+        B4["prod_financeiro.bronze.eventos_sap"]
+    end
+
+    subgraph SILVER["SILVER - limpo, tipado, deduplicado"]
+        SV1["prod_operacoes.silver.sensores_iot"]
+        SV2["prod_operacoes.silver.producao"]
+        SV3["prod_financeiro.silver.dim_fornecedores<br/>SCD Tipo 2"]
+        SV4["prod_financeiro.silver.eventos_sap"]
+        Q[("quarentena<br/>registros rejeitados com motivo")]
+    end
+
+    subgraph GOLD["GOLD - visoes de negocio"]
+        G1["prod_operacoes.gold.dash_operacao_sensores"]
+        G2["prod_operacoes.gold.produtividade_plantas"]
+        G3["prod_financeiro.gold.relatorios_financeiros_sap"]
+        G4["prod_datascience.feature_store.features_sensores_producao"]
+    end
+
+    subgraph CONS["Consumo"]
+        C1["Dashboards operacionais"]
+        C2["Relatorios financeiros"]
+        C3["Data Science / ML"]
+    end
+
+    S1 --> LZ
+    S2 --> LZ
+    S3 --> LZ
+    S4 --> LZ
+
+    LZ -->|"Auto Loader<br/>streaming, trigger 1 min"| B1
+    LZ -->|"Auto Loader<br/>availableNow"| B2
+    LZ -->|"snapshot diario ou semanal"| B3
+    LZ -->|"carga diaria + fechamento mensal"| B4
+
+    B1 -->|"dropDuplicatesWithinWatermark"| SV1
+    B1 -.->|"reconciliacao diaria<br/>MERGE insert-only"| SV1
+    B2 -->|"UTC, coalesce planta, tipos"| SV2
+    B3 -->|"AUTO CDC ou MERGE unico<br/>SCD Tipo 2"| SV3
+    B4 -->|"chaves normalizadas + FK"| SV4
+    SV3 -->|"lookup de fornecedor"| SV4
+    B2 -.->|"rejeitados"| Q
+    B4 -.->|"orfaos sinalizados"| Q
+
+    SV1 -->|"streaming, janelas 1 a 5 min"| G1
+    SV2 --> G2
+    SV3 --> G3
+    SV4 --> G3
+    SV1 --> G4
+    SV2 --> G4
+
+    G1 --> C1
+    G2 --> C1
+    G3 --> C2
+    G4 --> C3
+```
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
 
