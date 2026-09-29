@@ -175,21 +175,21 @@
 
 ## 1. Autenticação e Gestão de Segredos
 
-Para garantir segurança total e conformidade com boas práticas de DevSecOps, nenhuma credencial ou chave privada fica salva no código ou em variáveis de ambiente abertas
+Para garantir segurança total e conformidade com boas práticas, nenhuma credencial ou chave privada fica salva no código ou em variáveis de ambiente abertas
 
 * Gestão de Segredos (AWS Secrets Manager / Azure Key Vault):
 
-   * As chaves SSH , senhas SFTP, Tokens Bearer ou Client IDs/Secrets da API REST são armazenados no AWS Secrets Manager ou Azure Key Vault.
+   * Credenciais de origem (chaves SSH, tokens API REST, senhas SFTP) são armazenadas no AWS Secrets Manager ou no Azure Key Vault, aproveitando a infraestrutura onde o pipeline de borda é executado.
 
-   * A rotação de chaves/tokens pode ser configurada de forma automática no próprio serviço de segredos.
+   * A rotação de chaves e tokens ocorre de forma automatizada via rotinas nativas de cada serviço de segredos
 
 * Acesso por Identity Federation (IAM Roles / Managed Identities):
 
-   * O código do job de ingestão não possui usuários ou senhas de nuvem.
+   * O motor de execução não utiliza usuários ou chaves de API estáticas.
 
-   * O serviço assume uma IAM Role com políticas de Princípio do Menor Privilégio.
+   * Por meio de Federated Identity Credential / Workload Identity (conectando uma AWS IAM Role a uma Azure Managed Identity), os componentes de computação autenticam-se entre as nuvens com tokens temporários de curta duração (Princípio do Menor Privilégio)
 
-   * Em tempo de execução, a função consulta o Secrets Manager via SDK oficial usando a permissão concedida pela IAM Role.
+   * Em tempo de execução, a função de ingestão recupera o segredo do cofre via SDK e estabelece a conexão segura com o fornecedor externo.
 
 ## 2. Estratégia de Retry e Idempotência
 
@@ -199,57 +199,56 @@ Falhas de rede ou interrupções parciais de download não podem corromper o amb
 
    * Backoff Exponencial com Jitter: Se a conexão SFTP/REST falhar ou o servidor de origem estiver indisponível, a execução realiza até 3 a 5 tentativas, aumentando progressivamente o tempo de espera (ex.: 1min, 4min, 16min) com uma variação aleatória (jitter) para evitar sobrecarregar o servidor remoto.
 
-   * Dead Letter Queue (DLQ): Caso todas as tentativas falhem, a mensagem do job é enviada para uma fila de falhas para análise sem travar os próximos agendamentos.
+   * Se todas as tentativas falharem, a mensagem de controle é enviada para uma fila de falhas, acionando o time de engenharia sem interromper o restante da esteira de dados.
 
 ### 2.2. Idempotência e Tratamento de Falhas Parciais
 
-   * Aterrissagem Atomicamente Particionada (S3 Raw):
-      * O arquivo baixado é salvo no S3 em um caminho contendo a data lógica da carga: s3://bucket-raw/fornecedor_x/ano=YYYY/mes=MM/dia=DD/nome_arquivo_YYYYMMDD.csv.
+   * Aterrissagem Atômica e Carga Silver Idempotente:
+      * Os arquivos do fornecedor são baixados para o Data Lake em estrutura de partições lógicas:
    
-      * Se o download falhar no meio, um arquivo temporário (.tmp) é gravado. O pipeline garante que o arquivo só é renomeado para o nome definitivo após a conclusão do download com validação de MD5 Hash / Checksum.
+      * O download é realizado primeiramente em arquivo temporário (.tmp). O arquivo só é renomeado para a extensão final após a validação bem-sucedida do MD5 Checksum.
    
-   * Gravação Idempotente no Delta Lake (Carga Silver):
-      * No consumo da camada Raw para a Silver, utiliza-se o mecanismo de MERGE INTO no Delta Lake ou a gravação particionada com mode("overwrite") restrita à partição da data do arquivo (replaceWhere = "data_ingestao = 'YYYY-MM-DD'").
+   * Processamento Idempotente no Delta Lake:
+
+      * O motor de processamento lê a camada Raw e grava na camada Silver via MERGE INTO no Delta Lake, ou substituição atômica de partição (mode("overwrite") com replaceWhere = "data_ingestao = 'YYYY-MM-DD'").
       
       * Reprocessar o mesmo arquivo N vezes gera rigorosamente o mesmo resultado final na tabela, sem duplicar registros.
 
-### 2.3. Observabilidade e Alertas Automáticos
+## 3. Observabilidade e Monitoramento Cruzado
 
 O monitoramento passivo garante que o time de dados seja notificado proativamente sobre falhas ou atrasos na entrega.
 
-   * Detecção de Falha de Ingestão (Failure Alerts):
+   * Alertas Dinâmicos de Falha:
 
-      * Logs estruturados em formato JSON são enviados ao Amazon CloudWatch Logs / Azure Monitor.
+      * Logs estruturados em formato JSON gerados na ingestão são transmitidos em tempo real para o Amazon CloudWatch Logs e Azure Log Analytics.
 
-      * Se o código disparar uma exceção não tratada, um alarme no CloudWatch dispara imediatamente uma notificação via Amazon SNS integrada ao Slack / Microsoft Teams ou e-mail de plantão.
+      * Exceções e erros não tratados disparam alarmes (CloudWatch Alarms / Azure Monitor Alerts) que roteiam notificações unificadas via Amazon SNS / Azure Action Groups diretamente para canais do Slack, Microsoft Teams ou ferramentas de Pager.
    
    * Detecção de Atraso
 
-      * Para arquivos que devem chegar até um determinado horário (ex.: 07:00 AM):
+      * Um gatilho agendado (EventBridge Scheduled Rule ou Azure Logic Apps Trigger) executa no horário limite (ex.: 07:15 AM).
 
-      * É configurado uma CloudWatch Metric Math / EventBridge Scheduled Rule que roda às 07:15 AM.
+      * A rotina consulta diretamente os metadados do storage. Se nenhum novo arquivo for detectado na partição do dia, é emitida uma notificação "Arquivo do Fornecedor Não Entregue", por exemplo.
 
-      * A regra verifica se existe um novo arquivo no prefixo S3 do dia atual. Caso a contagem de arquivos seja 0, dispara-se um alerta de "Violação de SLA — Arquivo do Fornecedor Não Entregue".
-
-### 2.4. Controle e Otimização de Custos
+## 4. Controle e Otimização de Custos (FinOps)
 
 Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou finais de semana:
 
-   * Arquitetura Serverless para Ingestão (Zero Idle Cost):
+   * Ingestão Serverless sem Custo Ocioso:
 
-      * Usa-se AWS Lambda (para arquivos pequenos/médios até 10 GB) ou AWS Fargate (para arquivos maiores) acionados via agendamento do Amazon EventBridge.
+      * O download inicial utiliza event trigger.
 
-      * Se o arquivo não existir no servidor SFTP/REST, o script encerra a execução em poucos segundos, gerando um custo residual próximo de zero (centavos de dólar/mês).
+      * Em dias sem arquivo novo ou finais de semana, a execução é encerrada em segundos, mantendo o custo computacional em centavos de dólar por mês.
    
-   * Ingestão Orientada a Eventos no Lakehouse (Databricks Auto Loader / AWS Glue Streaming):
+   * Orquestração Orientada a Eventos no Lakehouse:
 
-      * Em vez de manter clusters Spark rodando continuamente à espera do arquivo, o upload no S3 gera um S3 Event Notification (SQS).
+      * O salvamento do arquivo na Landing Zone dispara uma notificação de evento (S3 Event -> SQS ou Azure Event Grid -> Queue).
 
-      * O job do Databricks/Glue é acionado somente após a confirmação de escrita no S3 usando a opção Trigger.AvailableNow (ou Trigger.Once). O cluster do Spark liga, processa o arquivo, escreve na Silver e desliga imediatamente (Auto-termination em 10-15 min).
+      * O processamento no Lakehouse é acionado de forma reativa através da opção Trigger.AvailableNow (ou Trigger.Once). O cluster de processamento sobe sob demanda, processa o dado da camada Raw para a Silver e desliga automaticamente por inatividade.
 
-   * Política de Lifecycle no S3 Raw:
+   * Gestão de Ciclo de Vida do Storage:
 
-      * Configuração de regras de S3 Lifecycle para mover os arquivos da landing zone (raw/) para o S3 Glacier Flexible Retrieval após 30 dias e deletá-los após 1 ano, reduzindo significativamente o custo de armazenamento de longo prazo.
+      * Políticas integradas de retenção movem os dados da camada Raw para armazenamento de arquivamento após 30 dias, programando o expurgo definitivo após 1 ano.
 
 ---
 
