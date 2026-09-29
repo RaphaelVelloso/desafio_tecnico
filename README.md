@@ -38,13 +38,13 @@
 
 ## 2. Pipeline Refatorado de Produção (`producao_moinhos.csv`)
    
-   [Codigo producao moinhos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/processo_moinhos.py)
+   [Codigo producao moinhos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/processo_moinhos.py)
 
 ## 3. Dimensão de Histórico SCD Tipo 2
 
-   [Diagrama controle cadastro fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_cadastro_fornecedor.markdown)
+   [Diagrama controle cadastro fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagramas/diagrama_cadastro_fornecedor.md)
 
-   [Codigo para cadastro de fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/cadastro_fornecedores.py)
+   [Codigo para cadastro de fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/cadastro_fornecedores.py)
 
 ## 4. Estratégia de Deduplicação de Dados Fora de Ordem
 
@@ -52,7 +52,7 @@
 
    A estratégia ideal em Spark/Databricks para resolver este problema em tempo real (ou em micro-batches contínuos) baseia-se na combinação de dois conceitos: Watermarking e Deduplicação de Estado (Stateful Deduplication).
 
-   [Diagrama watermark](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagrama_iot.md)
+   [Diagrama watermark](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagramas/diagrama_iot.md)
 
 ### Como Funciona a Mecânica Interna:
 #### 1. Janela de Watermark (Tolerância ao Atraso):
@@ -65,7 +65,7 @@
 #### 3. Limpeza Automática de Estado (Garbage Collection):
    Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
 
-   [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/sensores_iot.py)
+   [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/sensores_iot.py)
 
 ---
 
@@ -80,7 +80,7 @@
 ## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
    Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
 
-   [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/silver.eventos_sap.sql)
+   [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/silver.eventos_sap.sql)
 
 ---
 
@@ -254,7 +254,9 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
 # Parte 6 — Uso crítico de ferramentas de IA
 
-   * IA — ChatGPT
+   ## Escolha pelo menos uma das Partes 2 a 5 e use uma ferramenta de IA (Copilot, ChatGPT, Databricks Assistant/Genie ou similar) para gerar uma primeira versão da solução antes de você revisar e ajustar.
+   
+      * IA — ChatGPT
 
 
 ---

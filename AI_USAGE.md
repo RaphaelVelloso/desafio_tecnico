@@ -43,12 +43,30 @@ Parte do prompt: Crie um resumo de uma forma tabelar para que eu consiga documen
 
 ### Reescreva o pipeline de produção aplicando boas práticas: leitura escalável (sem collect()), enforcement de schema, tratamento de erros/logging, e carga incremental/idempotente (não reprocessar o histórico inteiro acada execução).
 
+[Refatoracao do codigo apresentado](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/refatoracao_parte2_gpt.py)
+
 
 ### Implemente o tratamento de cadastro_fornecedores como uma dimensão de histórico (SCD Tipo 2), preservando as versões anteriores dos registros.
 
+[Codigo cadastro_fornecedores GPT](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/implementacao_scd2_gpt.py)
+
+Achei bem interessante a maneira como o codigo foi desenvolvido e muito mais simples do que pensei anteriormente
 
 ### Explique — em texto ou código — a estratégia que você usaria para deduplicar as leituras de sensores_iot.json considerando que elas chegam fora de ordem.
 
 Para sensores_iot.json, eu trataria a deduplicação como um problema de event time + chave do evento + dados chegando fora de ordem, e não simplesmente como um dropDuplicates().
 
 Identificar unicamente o evento pelo sensor_id + event_id (ou sensor_id + event_timestamp, caso não exista event_id), utilizar o event_timestamp como event time, aplicar watermark para limitar o estado mantido pelo Spark e persistir os dados em Delta.
+
+### Responda de forma dissertativa (10-15 linhas): descreva uma situação — neste desafio ou na sua experiência — em que uma sugestão de IA parecia correta à primeira vista, mas continha um erro sutil (técnico ou de lógica). Como você percebeu o erro e o que isso te ensinou sobre validar código gerado por IA?
+
+Em um projeto recente, no qual construí um lineage técnico para migração de plataformas, utilizei uma REST API da Microsoft para capturar informações sobre datasets, dataflows, relatórios, colunas e seus relacionamentos, com o objetivo de mapear o fluxo de dados end-to-end, ou seja, da origem ate o consumo.
+Para esse desenvolvimento, precisei trabalhar com grafos para representar os relacionamentos up e downstream e utilizei IA generativa como suporte na construção de algumas soluções.
+O código gerado parecia estar correto e o adaptei ao meu contexto, mas, durante as validações, identifiquei um problema sutil na cardinalidade dos relacionamentos.
+Alguns relacionamentos estavam sendo tratadas como muitos-para-muitos, gerando um produto cartesiano e, consequentemente, uma volumetria de dados muito maior que a esperada.
+Também identifiquei problemas em cenários com ciclos dentro desses downstream datasets e dataflows,pois um consumia dado de outro e esse segundo consumia dado de um terceiro, que por sua vez consumia dado do primeiro.
+Percebi os erros ao comparar a cardinalidade e a volumetria esperadas com os resultados gerados e ao validar manualmente alguns caminhos do grafo.
+Isso me ensinou que um código gerado por IA pode estar sintaticamente correto e produzir resultados aparentemente plausíveis, mas ainda conter erros de lógica.
+A principal lição foi que a IA deve ser utilizada como ferramenta de apoio, e não como substituta da validação técnica.
+Passei a validar não apenas se o código executa, mas também suas premissas, cardinalidade, casos de borda, volumetria e resultados esperados.
+Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas não substituem o conhecimento técnico e a validação do resultado.
