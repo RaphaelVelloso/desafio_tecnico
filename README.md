@@ -14,7 +14,7 @@
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
-<a href="https://exemplo.com" target="_blank">Abrir link</a>
+<a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-1/diagrama_arquitetura.md" target="_blank">Diagrama Arquitetura</a>
 
 | Camada | Fonte / Dataset | SLA / Frequência | Estratégia de Ingestão | Formato & Particionamento | Tratamento & Schema Evolution | Governança (Unity Catalog) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -50,14 +50,15 @@
       O código original ignora a transição da coluna `planta_id` para `id_planta` ao longo do arquivo, o que lança erros de chave (`KeyError`) ao tentar acessar `linha['toneladas_produzidas']`.
 
 ## 2. Pipeline Refatorado de Produção (`producao_moinhos.csv`)
-   
-   [Codigo producao moinhos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/processo_moinhos.py)
+
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/processo_moinhos.py" target="_blank">Codigo producao moinhos</a>
 
 ## 3. Dimensão de Histórico SCD Tipo 2
 
-   [Diagrama controle cadastro fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagramas/diagrama_cadastro_fornecedor.md)
-
-   [Codigo para cadastro de fornecedor](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/cadastro_fornecedores.py)
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/diagrama_cadastro_fornecedor.md" target="_blank">Diagrama controle cadastro fornecedor</a>
+   
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/cadastro_fornecedores.py" target="_blank">Codigo para cadastro de fornecedor</a>
+   
 
 ## 4. Estratégia de Deduplicação de Dados Fora de Ordem
 
@@ -65,7 +66,7 @@
 
    A estratégia ideal em Spark/Databricks para resolver este problema em tempo real (ou em micro-batches contínuos) baseia-se na combinação de dois conceitos: Watermarking e Deduplicação de Estado (Stateful Deduplication).
 
-   [Diagrama watermark](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/diagramas/diagrama_iot.md)
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/diagrama_iot.md" target="_blank">Diagrama watermark</a>
 
 ### Como Funciona a Mecânica Interna:
 #### 1. Janela de Watermark (Tolerância ao Atraso):
@@ -78,7 +79,7 @@
 #### 3. Limpeza Automática de Estado (Garbage Collection):
    Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
 
-   [Exemplo simplificado deduplicacao](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/sensores_iot.py)
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/sensores_iot.py" target="_blank">Exemplo simplificado deduplicacao</a>
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
 ---
@@ -94,7 +95,7 @@
 ## 3. Qualidade de Dados: Violação de Integridade Referencial (eventos_sap vs cadastro_fornecedores)
    Esta consulta identifica lançamentos na tabela financeira (silver.eventos_sap) cujos fornecedores não existem na dimensão ativa de fornecedores (silver.cadastro_fornecedores), consolidando a contagem de registros e a volumetria financeira afetada agrupadas por mês de ocorrência.
 
-   [Codigo SQL para os 3 topicos](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/silver.eventos_sap.sql)
+   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/silver.eventos_sap.sql" target="_blank">Codigo SQL para os 3 topicos</a>
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
 ---
@@ -276,7 +277,7 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
 ## Crie um arquivo AI_USAGE.md contendo: o(s) prompt(s) principais usados; um resumo do que a IA sugeriu; o que você manteve, o que você mudou e por quê; e qualquer erro ou suposição incorreta que a IA tenha introduzido.
 
-   * [AI_USAGE](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/AI_USAGE.md)
+   * <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/AI_USAGE.md" target="_blank">AI_USAGE</a>
 
    A parte escolhida para o desenvolvimento das competências foi a 2 dentro do desafio.
 

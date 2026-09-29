@@ -45,16 +45,17 @@ Parte do prompt: Crie um resumo de uma forma tabelar para que eu consiga documen
 
 ### Reescreva o pipeline de produção aplicando boas práticas: leitura escalável (sem collect()), enforcement de schema, tratamento de erros/logging, e carga incremental/idempotente (não reprocessar o histórico inteiro acada execução).
 
-[Refatoracao do codigo apresentado](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/refatoracao_parte2_gpt.py)
-
+<a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-6/refatoracao_parte2_gpt.py" target="_blank">Refatoracao do codigo apresentado</a>
 
 ### Implemente o tratamento de cadastro_fornecedores como uma dimensão de histórico (SCD Tipo 2), preservando as versões anteriores dos registros.
 
-[Codigo cadastro_fornecedores GPT](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/implementacao_scd2_gpt.py)
+<a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-6/implementacao_scd2_gpt.py" target="_blank">Codigo cadastro_fornecedores GPT</a>
 
 Achei bem interessante a maneira como o codigo foi desenvolvido e muito mais simples do que pensei anteriormente
 
 ### Explique — em texto ou código — a estratégia que você usaria para deduplicar as leituras de sensores_iot.json considerando que elas chegam fora de ordem.
+
+<a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-6/deduplicacao_gpt.py" target="_blank">Deduplicacao GPT</a>
 
 Para sensores_iot.json, eu trataria a deduplicação como um problema de event time + chave do evento + dados chegando fora de ordem, e não simplesmente como um dropDuplicates().
 
