@@ -63,7 +63,7 @@ A coluna **"Verificado em execução?"** deve ser preenchida por você **depois 
 `[PREENCHER: ferramenta que gerou estes arquivos/textos, ou "escritos por mim"]`
 
 | # | Arquivo | Erro ou imprecisão | Como verificar |
-| :-- | :-- | :-- | :-- | :-- |
+| :-- | :-- | :-- | :-- |
 | 8 | `cadastro_fornecedores.py`, `processo_moinhos.py` | `whenMatchedAnd` e `updateExpr` não existem no merge builder Python do Delta (o correto é `whenMatchedUpdate(condition=..., set=...)`); `whenNotMatchedInsert` recebe um dict no lugar do argumento `condition` | `[m for m in dir(DeltaMergeBuilder) if m.startswith("when")]` e rodar a função |
 | 9 | `cadastro_fornecedores.py` | `concat_ws` ignora NULLs: `("A", NULL, "B")` e `("A", "B", NULL)` geram o mesmo hash e a mudança não é detectada | `SELECT sha2(concat_ws('\|\|','A',NULL,'B'),256) = sha2(concat_ws('\|\|','A','B',NULL),256)` deve retornar `true` |
 | 10 | `processo_moinhos.py` | O arquivo contém o SCD2 de fornecedores em vez do pipeline de produção e não importa `SparkSession` (usado na anotação de tipo) | Importar o módulo |
@@ -86,7 +86,7 @@ A coluna **"Verificado em execução?"** deve ser preenchida por você **depois 
 ## 5. O que mantive, o que mudei e por quê
 
 | Tema | ChatGPT propôs | Versão proposta na revisão | Por quê |
-| :-- | :-- | :-- | :-- | :-- |
+| :-- | :-- | :-- | :-- |
 | Estrutura em funções (ler, tratar, carregar) | Funções separadas por etapa | **Manter**, com `Config` e argumentos | Separação clara e testável |
 | Schema | `StructType` explícito com `FAILFAST` | Bronze em string + `try_cast` + constraints Delta | Evitar mapeamento posicional e falha total por um valor inválido |
 | Carga | MERGE por `id_producao` sobre a leitura completa | Auto Loader + MERGE por chave de negócio, com dedup no lote e condição por ingestão | Incrementalidade real e idempotência |
