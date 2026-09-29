@@ -5,9 +5,12 @@
 ## Índice
 
 - [Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.](#parte-1--arquitetura-medallion--plataforma-niometal-sa)
-- [Parte 2 — Refatoração do Pipeline](#parte-2--refatoração-do-pipeline)
-- [Parte 3 — SCD Tipo 2](#parte-3--scd-tipo-2)
-- [Parte 4 — Deduplicação de IoT](#parte-4--deduplicação-de-iot)
+- [Parte 2 — Pipeline PySpark](#parte-2--pipeline-pyspark)
+- [Parte 3 — SQL Avançado](#parte-3--sql-avançado)
+- [Parte 4 — Troubleshooting e Performance](#parte-4--troubleshooting-e-performance)
+- [Parte 5 — Integração e nuvem](#parte-5--integração-e-nuvem)
+- [Parte 6 — Uso Crítico de Ferramentas de IA](#parte-6--uso-critico-de-ferramentas-de-ia)
+- [Documentação](#Documentacao)
 
 # Parte 1 — Arquitetura Medallion — Plataforma NioMetal S.A.
 
@@ -76,7 +79,7 @@
 
 ---
 
-# Parte 3 — SQL avançado
+# Parte 3 — SQL Avançado
 
 ## 1. Moinhos com Maior Queda Percentual de Produção Mês a Mês (Últimos 6 Meses)
    Esta consulta calcula a produção consolidada por mês/moinho, busca o valor do mês anterior através da função de janela LAG(), calcula a variação percentual e identifica os 3 moinhos com a maior queda percentual no período.
@@ -91,7 +94,7 @@
 
 ---
 
-# Parte 4 — Troubleshooting e performance
+# Parte 4 — Troubleshooting e Performance
 
    Ao investigar uma degradação severa sem alteração de código, a investigação deve ir do nível macro (infra/recursos) para o nível micro (execução de DAG/código)
 
@@ -259,7 +262,7 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
 ---
 
-# Parte 6 — Uso crítico de ferramentas de IA
+# Parte 6 — Uso Crítico de Ferramentas de IA
 
 ## Escolha pelo menos uma das Partes 2 a 5 e use uma ferramenta de IA (Copilot, ChatGPT, Databricks Assistant/Genie ou similar) para gerar uma primeira versão da solução antes de você revisar e ajustar.
    * IA — ChatGPT
@@ -295,7 +298,7 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 
 ---
 
-# Documentação usada
+# Documentação
 
 ## Apache Spark & Databricks Architecture
 
