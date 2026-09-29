@@ -263,24 +263,24 @@ Para evitar gastos computacionais desnecessários em dias sem arquivos novos ou 
 
 ## Apache Spark & Databricks Architecture
 
-   [Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)
-   [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html)
-   [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe)
-   [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader)
-   [Delta Lake](https://docs.databricks.com/aws/en/delta)
-   [Optimize data](https://docs.databricks.com/aws/en/tables/operations/optimize)
+   * [Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)
+   * [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html)
+   * [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe)
+   * [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader)
+   * [Delta Lake](https://docs.databricks.com/aws/en/delta)
+   * [Optimize data](https://docs.databricks.com/aws/en/tables/operations/optimize)
 
 ## Segurança, Gestão de Segredos
-   [Azure Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)
-   [Azure resources](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)
-   [IAM Roles e Políticas de Menor Privilégio](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html)
+   * [Azure Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)
+   * [Azure resources](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)
+   * [IAM Roles e Políticas de Menor Privilégio](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html)
 
 ## Padrões de Ingestão, Eventos e Armazenamento
-   [Azure Data Factory / Synapse Pipelines](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory)
-   [Event Grid](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema)
-   [MERGE INTO e Gravação Idempotente](https://docs.delta.io/delta-update/)
+   * [Azure Data Factory / Synapse Pipelines](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory)
+   * [Event Grid](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema)
+   * [MERGE INTO e Gravação Idempotente](https://docs.delta.io/delta-update/)
 
 ## Observabilidade, Monitoramento e Alertas
-   [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview)
-   [Alertas de Métrica e Regras de Agendamento no Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview)
-   [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)
+   * [Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview)
+   * [Alertas de Métrica e Regras de Agendamento no Azure Monitor](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview)
+   * [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)
