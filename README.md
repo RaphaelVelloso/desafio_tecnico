@@ -314,50 +314,184 @@ ALTER TABLE prod_operacoes.silver.producao SET ROW FILTER prod_operacoes.governa
 
 ## 1. Problemas Técnicos Identificados no Código Original
 
-   1. **Gargalo de Memória e Risco de Out-Of-Memory (`df.collect()`)**:  
-      O método `collect()` traz todos os dados distribuídos do cluster para a memória do *Driver Node*. Em volumes reais de produção, isso gera um alto gargalo de I/O de rede e causa exceções de *Out Of Memory* (OOM), anulando o poder de processamento distribuído do Spark.
-   2. **Processamento Iterativo Não Distribuído (Loop `for` em Python)**:  
-      Iterar linha a linha (`for linha in dados`) força a execução sequencial na CPU do *Driver Node*. As operações do PySpark devem ser aplicadas de forma vetorial e distribuída entre os *Executors*.
-   3. **Ausência de Enforcement de Schema e Leitura Lenta**:  
-      A leitura sem a definição de um `schema` explícito exige que o Spark infira os tipos de dados ou leia tudo como *String*, tornando a ingestão lenta e propensa a falhas de tipagem na conversão.
-   4. **Operação Não Idempotente (`mode('overwrite')`)**:  
-      Sobreescrever a tabela Silver inteira a cada execução apaga o histórico de dados, causa *downtime* para os consumidores da camada Gold/Dashboards durante a carga e gera custo computacional desnecessário.
-   5. **Incapacidade de Tratar Mudança de Schema**:  
-      O código original ignora a transição da coluna `planta_id` para `id_planta` ao longo do arquivo, o que lança erros de chave (`KeyError`) ao tentar acessar `linha['toneladas_produzidas']`.
+   | Arquivo | Conteúdo |
+   | :-- | :-- |
+   | `common.py` | Logging estruturado, contrato de schema, retry de evolução de schema |
+   | `pipeline_producao_moinhos.py` | Landing → Bronze → Silver de produção, com quarentena |
+   | `scd2_fornecedores.py` | Dimensão de fornecedores em SCD Tipo 2 |
+   | `dedup_sensores_iot.py` | Deduplicação dos sensores (stream + reconciliação) |
+
+   | # | Problema | Causa e impacto | Como o código novo resolve |
+   | :-- | :-- | :-- | :-- |
+   | 1 | `df.collect()` | Traz **todas** as linhas para a memória do driver. Com volume real causa OOM e anula o processamento distribuído. | Nenhuma ação traz dados ao driver; tudo é DataFrame/streaming. |
+   | 2 | Loop `for` em Python para filtrar | Executa linha a linha em um único processo. O que um `filter` distribuído faz em paralelo vira trabalho sequencial. | Filtros e validações são expressões Spark (`F.when`, `F.filter`). |
+   | 3 | `spark.createDataFrame(resultado)` | Reenvia os dados do driver ao cluster e **reinfere o schema** a partir de objetos Python. Com lista vazia falha ("can not infer schema from empty dataset"). | O DataFrame nunca sai do Spark; os tipos vêm de `try_cast` explícito. |
+   | 4 | Leitura sem schema | `csv(header=True)` sem `inferSchema` lê **tudo como string**, então `toneladas_produzidas` nunca é validada como número. Os nomes de coluna vêm de um único header. | Bronze em string (não falha por tipagem); Silver com tipos via `try_cast`, contrato de colunas e constraints Delta (ver seção 2). |
+   | 5 | `mode('overwrite')` a cada execução | Reescreve a tabela inteira (custo crescente) e **não é incremental**. Se o raw for rotacionado, o histórico some. Commits de overwrite também quebram consumidores em streaming que esperam só appends. Obs.: o overwrite do Delta é atômico, então não causa downtime. | Auto Loader processa só arquivos novos; MERGE idempotente por chave de negócio. |
+   | 6 | Sem deduplicação | O dataset traz linhas duplicadas e horários em fusos diferentes; ambos passam direto para a Silver. | Normalização para UTC e deduplicação por `(planta, moinho, instante UTC)`. |
+   | 7 | Descarte silencioso de nulos | Registros sem `toneladas_produzidas` somem sem rastro: sem contagem, sem motivo, sem como reprocessar. | Quarentena com payload, motivos, arquivo de origem e timestamp. |
+   | 8 | Sem tratamento de erros nem logging | Falha de leitura ou escrita não deixa evidência e não há métrica para alertar. | Log JSON por micro-batch e exceção propagada (o Job falha e aciona retry/alerta). |
+   | 9 | Caminhos `/mnt/...` hardcoded e escrita por path | Montagens DBFS não são governadas pelo Unity Catalog (sem lineage, sem permissões finas) e o código não é promovível entre ambientes. | Volumes/tabelas do Unity Catalog e parâmetros do Job. |
+   | 10 | Raw → Silver direto, sem Bronze | Sem uma cópia imutável do dado original, corrigir uma regra exige reler o raw (que pode ter sido rotacionado). | Landing → Bronze append-only → Silver. |
+   | 11 | `carregar_fornecedores` com `overwrite` | Destrói o histórico de mudanças (endereço, status, dados bancários), que o enunciado diz ser necessário para auditoria. | SCD Tipo 2 (seção 3). |
+   | 12 | Funções sem parâmetros e dependentes de `spark` global | Não é testável nem reutilizável. | `Config` e argumentos do Job; funções puras que recebem `spark`/DataFrame. |
+
+
+
 
 ## 2. Pipeline Refatorado de Produção (`producao_moinhos.csv`)
 
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/processo_moinhos.py" target="_blank">Codigo producao moinhos</a>
+```mermaid
+flowchart LR
+    L[("Landing<br/>CSV")] -->|"Auto Loader<br/>availableNow"| B["Bronze<br/>append-only, tudo string"]
+    B -->|"stream + foreachBatch"| N["Normaliza<br/>planta_id, UTC, tipos"]
+    N -->|"valido"| D["Deduplica<br/>planta + moinho + instante UTC"]
+    N -->|"rejeitado"| Q[("Quarentena<br/>payload + motivos")]
+    D -->|"MERGE idempotente"| S["Silver producao"]
+```
+### Como cada requisito do enunciado é atendido
 
-## 3. Dimensão de Histórico SCD Tipo 2
+| Requisito | Implementação | Por quê |
+| :-- | :-- | :-- |
+| **Leitura escalável (sem `collect()`)** | Auto Loader no Bronze; Delta como fonte de streaming no Silver. | O processamento fica distribuído e o volume de dados não é limitado pela memória do driver. |
+| **Enforcement de schema** | (1) `assert_required_columns` falha rápido se o Bronze perder colunas essenciais; (2) `try_cast` para `TIMESTAMP` e `DECIMAL(18,3)` — valor inválido vira `NULL` e a linha vai para a quarentena; (3) `NOT NULL` e `CHECK (toneladas_produzidas >= 0)` na tabela Silver. | Não usei `spark.read.schema(...)` em CSV porque, com `enforceSchema=true` (padrão), o Spark ignora os nomes do header e mapeia por **posição**: a mudança `planta_id` → `id_planta` (ou qualquer reordenação) passaria em silêncio. O `nullable=False` de um schema Spark também é ignorado em fontes de arquivo; o enforcement real está nas constraints do Delta. |
+| **Tratamento de erros e logging** | `log_event` em JSON por micro-batch (lidos, rejeitados, duplicados removidos, segundos); `logger.exception` + `raise`. | Propagar o erro faz o Job falhar, acionar retry e alerta. O checkpoint garante que nada se perde, e o MERGE é idempotente, então reprocessar é seguro. |
+| **Carga incremental** | Checkpoint do Auto Loader (arquivos) e do stream Delta (offsets do Bronze). | Cada execução processa só o que é novo. |
+| **Idempotência** | MERGE por `(planta_id, moinho_id, data_producao_utc)`; `whenMatchedUpdateAll` só se `s._ingestion_ts > t._ingestion_ts`; escrita idempotente da quarentena (`txnAppId` + `txnVersion`). | Reexecutar o mesmo lote ou reprocessar um arquivo não duplica linhas nem sobrescreve dado mais novo por um mais antigo. |
 
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/diagrama_cadastro_fornecedor.md" target="_blank">Diagrama controle cadastro fornecedor</a>
-   
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/cadastro_fornecedores.py" target="_blank">Codigo para cadastro de fornecedor</a>
-   
+### Decisões e trade-offs
 
-## 4. Estratégia de Deduplicação de Dados Fora de Ordem
+- **`foreachBatch` + MERGE** em vez de um MERGE em cima da leitura completa do Bronze. O checkpoint entrega só o novo, e o MERGE por chave torna a reexecução de um lote segura (o `foreachBatch` tem semântica at-least-once).
+- **Sessão em UTC** (`spark.sql.session.timeZone = UTC`): o parse de strings sem offset passa a ser "literal", e a conversão de horário local para UTC fica explícita em `to_utc_timestamp`. Assim o resultado não depende da configuração do cluster.
+- **Deduplicar depois de normalizar para UTC:** a mesma leitura escrita em UTC num arquivo e em horário local em outro só é reconhecida como duplicata quando ambas estão no mesmo fuso.
+- **Custo:** `persist()` do lote e algumas ações (`count`) por micro-batch. É aceitável para observabilidade e evita recomputar a normalização.
+- **Limitação conhecida:** `txnVersion` usa o `batch_id`, que reinicia se o checkpoint for recriado. Após recriar o checkpoint, use um novo `txnAppId`.
 
-### Structured Streaming com Watermarking
+### Premissas (ver registro de suposições no README)
 
-   A estratégia ideal em Spark/Databricks para resolver este problema em tempo real (ou em micro-batches contínuos) baseia-se na combinação de dois conceitos: Watermarking e Deduplicação de Estado (Stateful Deduplication).
+- A mudança `planta_id` → `id_planta` ocorre **entre arquivos**.
+- Timestamp com offset ou `Z` é UTC; sem offset é horário local da planta (padrão `America/Sao_Paulo`, configurável por planta).
+- Ponto decimal `.` em `toneladas_produzidas`.
+- A chave de negócio é `(planta_id, moinho_id, instante)`; a coluna de data se chama `data_producao`.
 
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/diagrama_iot.md" target="_blank">Diagrama watermark</a>
+---
 
-### Como Funciona a Mecânica Interna:
-#### 1. Janela de Watermark (Tolerância ao Atraso):
-   O Watermark estabelece o limite de tempo que o engine do Spark aceita esperar por dados atrasados em relação ao maior timestamp visto até ao momento.
-   Exemplo: Com .withWatermark("timestamp", "2 hours"), se o Spark já processou um evento de 14:00, eventos com timestamp anterior a 12:00 serão descartados se chegarem depois.
+## 3. Dimensão de fornecedores — SCD Tipo 2
 
-#### 2. Gerenciamento de Estado (RocksDB/State Store):
-   O Spark mantém um registo temporário das chaves únicas de dedup (sensor_id + timestamp) na memória/disco do executor. Quando um evento duplicado chega dentro da janela de 2 horas, o Spark compara-o com o estado e descarta-o.
+### Modelo
 
-#### 3. Limpeza Automática de Estado (Garbage Collection):
-   Assim que o tempo do Watermark avança, o Spark limpa o estado das chaves mais antigas do que a janela definida, garantindo que a memória não estoure (Out Of Memory), mesmo que o stream rode indefinidamente.
+| Coluna | Papel |
+| :-- | :-- |
+| `fornecedor_id` | Chave de negócio |
+| `nome`, `endereco`, `status_contratual`, `dados_bancarios` | Atributos versionados |
+| `attribute_hash` | SHA-256 do JSON dos atributos (detecta mudança sem comparar coluna a coluna) |
+| `valid_from` / `valid_to` | Vigência em intervalo **semiaberto** `[valid_from, valid_to)`; `valid_to` é `NULL` na versão corrente |
+| `is_current` | Facilita consultas à versão atual |
 
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/sensores_iot.py" target="_blank">Exemplo simplificado deduplicacao</a>
+Exemplo: o fornecedor F1 muda de endereço em 2026-03-01.
 
-<small><a href="#indice">⬆️ Voltar ao topo</a></small>
+| fornecedor_id | endereco | valid_from | valid_to | is_current |
+| :-- | :-- | :-- | :-- | :-- |
+| F1 | Rua A, 10 | 2025-01-10 | 2026-03-01 | false |
+| F1 | Rua B, 20 | 2026-03-01 | NULL | true |
+
+### Algoritmo (um único MERGE)
+
+1. Limpa os atributos (`trim`, vazio vira `NULL`) e calcula `attribute_hash`.
+2. Mantém **uma linha por fornecedor** no snapshot (a mais recente).
+3. Identifica os fornecedores **alterados**: existem como corrente, o hash difere e a vigência da fonte é maior que a `valid_from` atual.
+4. Monta o lote do MERGE: todos os fornecedores com `merge_key = fornecedor_id` **mais** uma segunda cópia dos alterados com `merge_key = NULL`.
+5. `MERGE ... ON t.fornecedor_id = s.merge_key AND t.is_current = true`:
+   - **Casou e mudou:** fecha a versão (`valid_to = vigência nova`, `is_current = false`).
+   - **Não casou:** insere. Isso cobre fornecedor novo (`merge_key = id`) e a nova versão dos alterados (`merge_key = NULL`, que nunca casa).
+
+**Por que um único MERGE?** Fechar e inserir na mesma transação Delta evita o estado "fornecedor sem versão corrente" que uma falha entre dois comandos deixaria, e os intervalos ficam contíguos porque a `valid_to` antiga é igual à `valid_from` nova.
+
+**Por que o hash usa `to_json(struct(...))`?** `concat_ws` ignora NULLs, então `("A", NULL, "B")` e `("A", "B", NULL)` gerariam o mesmo texto e a mudança passaria despercebida. O JSON preserva o nome de cada campo. O sal opcional (`--salt`, vindo de secret scope) dificulta reverter o hash por força bruta.
+
+**Idempotência:** reexecutar o mesmo snapshot não muda nada, porque o hash é igual ao da versão corrente. Um snapshot atrasado não regride a dimensão, por causa da guarda `vigencia_ts > valid_from`.
+
+**Ordem:** se um micro-batch tiver mais de um snapshot, eles são aplicados em ordem cronológica, um MERGE por snapshot, para preservar as versões intermediárias.
+
+### Validações (rodar após cada carga)
+
+```sql
+-- 1. Exatamente uma versão corrente por fornecedor (deve retornar 0 linhas)
+SELECT fornecedor_id
+FROM prod_financeiro.silver.dim_fornecedores
+GROUP BY fornecedor_id
+HAVING SUM(CAST(is_current AS INT)) <> 1;
+
+-- 2. Sem sobreposição nem buraco entre versões (deve retornar 0 linhas)
+SELECT fornecedor_id, valid_from, valid_to, prox_from
+FROM (
+  SELECT fornecedor_id, valid_from, valid_to,
+         LEAD(valid_from) OVER (PARTITION BY fornecedor_id ORDER BY valid_from) AS prox_from
+  FROM prod_financeiro.silver.dim_fornecedores
+)
+WHERE prox_from IS NOT NULL AND valid_to <> prox_from;
+```
+
+### Limitações e decisões em aberto
+
+- **Remoções:** um fornecedor que some do snapshot não é encerrado. Tratar isso exige decidir se o arquivo é um retrato completo e como representar "inativo" (extensão possível: `whenNotMatchedBySourceUpdate`).
+- **Vigência de negócio:** vem da coluna `data_atualizacao`. Sem ela, usa a data do snapshot, o que perde precisão se houver várias mudanças entre snapshots.
+- **Chave substituta (surrogate key):** não incluí uma coluna `IDENTITY`, pois ela restringe transações concorrentes. Se o modelo dimensional exigir, pode ser adicionada.
+- **`dados_bancarios`:** fica em claro na Silver e é protegido por *column mask* do Unity Catalog (ver Parte 1).
+
+---
+
+## 4. Deduplicação das leituras dos sensores (fora de ordem)
+
+### O problema
+
+As leituras chegam fora de ordem (*late-arriving*) e algumas se repetem por falha de rede. Deduplicar não exige ordenar os eventos, exige **reconhecer que dois registros são a mesma leitura** sem guardar estado para sempre.
+
+### Estratégia
+
+1. **Identidade da leitura:** `(sensor_id, event_ts)` ou, se a fonte trouxer um identificador, `(sensor_id, event_id)`. O `event_ts` é o **event time** (quando a leitura ocorreu), não o horário de chegada.
+2. **Watermark sobre o event time:** `withWatermark("event_ts", "2 hours")` limita o estado do Spark. O Spark só guarda chaves dentro da janela de atraso aceita.
+3. **`dropDuplicatesWithinWatermark`:** remove duplicatas dentro do watermark e expira o estado junto com ele. Um `dropDuplicates` comum que **não** inclua o event time na chave manteria o estado para sempre (crescimento ilimitado); com o event time na chave o estado é limpo, e a variante `WithinWatermark` dispensa essa exigência.
+4. **Bronze guarda tudo:** o stream descarta leituras mais atrasadas que o watermark, o que seria perda silenciosa. Por isso o Bronze é append-only e completo.
+5. **Reconciliação periódica:** um `MERGE` *insert-only* a partir do Bronze insere na Silver o que faltar (leituras atrasadas demais para o stream), sem alterar o que já existe.
+
+```mermaid
+flowchart LR
+    B[("Bronze<br/>tudo, append-only")] -->|"stream 1 min<br/>watermark + dropDuplicatesWithinWatermark"| S["Silver sensores"]
+    B -->|"reconciliacao periodica<br/>MERGE insert-only"| S
+```
+
+### Alternativas consideradas
+
+| Alternativa | Vantagem | Desvantagem | Decisão |
+| :-- | :-- | :-- | :-- |
+| `dropDuplicates` sem watermark | Simples | Estado cresce sem limite; o job degrada e eventualmente falha | Descartada |
+| Watermark grande (dias) | Cobre quase todo atraso | Estado enorme, alto custo e checkpoint pesado | Descartada |
+| Só MERGE em cada micro-batch | Sem estado; aceita qualquer atraso | MERGE a cada minuto é caro e concorre com o stream | Usado só na reconciliação |
+| **Stream com watermark + reconciliação** | Baixa latência **e** completude | Duas rotas para manter | **Escolhida** |
+
+### Como dimensionar o watermark
+
+Meça o atraso real no Bronze e escolha um percentil alto (p99) como ponto de partida:
+
+```sql
+SELECT percentile_approx(
+         unix_timestamp(_ingestion_ts) - unix_timestamp(CAST(`timestamp` AS TIMESTAMP)),
+         array(0.5, 0.95, 0.99, 0.999)) AS atraso_segundos
+FROM prod_operacoes.bronze.sensores_iot;
+```
+
+O valor de 2 h no código é **provisório** até essa medição. Se o p99 for de poucos minutos, um watermark de 15 a 30 minutos reduz estado e custo.
+
+### Como monitorar
+
+No `lastProgress` do stream, acompanhe `stateOperators[0].numRowsTotal` (o estado deve se estabilizar) e `numRowsDroppedByWatermark` (leituras que a reconciliação terá de recuperar).
+
+### Limitações
+
+- Duas leituras com a mesma chave e **valores diferentes** (falha do sensor) ficam com a primeira ingerida. Se isso importar, a regra de desempate precisa ser definida com o negócio.
+- Linhas sem `sensor_id` ou sem timestamp permanecem no Bronze e não chegam à Silver. Em produção, devem gerar métrica e alerta.
+- A reconciliação e o stream escrevem na mesma tabela; conflitos de concorrência são esperados e tratados com nova tentativa.
 
 ---
 
