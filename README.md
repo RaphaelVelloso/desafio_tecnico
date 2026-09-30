@@ -316,10 +316,10 @@ ALTER TABLE prod_operacoes.silver.producao SET ROW FILTER prod_operacoes.governa
 
    | Arquivo | Conteúdo |
    | :-- | :-- |
-   | `common.py` | Logging estruturado, contrato de schema, retry de evolução de schema |
-   | `pipeline_producao_moinhos.py` | Landing → Bronze → Silver de produção, com quarentena |
-   | `scd2_fornecedores.py` | Dimensão de fornecedores em SCD Tipo 2 |
-   | `dedup_sensores_iot.py` | Deduplicação dos sensores (stream + reconciliação) |
+   | [common.py](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/common.py) | Logging estruturado, contrato de schema, retry de evolução de schema |
+   | [pipeline_producao_moinhos.py](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/pipeline_producao_moinhos.py) | Landing → Bronze → Silver de produção, com quarentena |
+   | [scd2_fornecedores.py](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/scd2_fornecedores.py) | Dimensão de fornecedores em SCD Tipo 2 |
+   | [dedup_sensores_iot.py](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-2/dedup_sensores_iot.py) | Deduplicação dos sensores (stream + reconciliação) |
 
    | # | Problema | Causa e impacto | Como o código novo resolve |
    | :-- | :-- | :-- | :-- |
@@ -499,13 +499,11 @@ No `lastProgress` do stream, acompanhe `stateOperators[0].numRowsTotal` (o estad
 
 # Parte 3 — SQL Avançado
 
-Arquivos (em `src/parte-3/`):
-
 | Arquivo | Consulta |
 | :-- | :-- |
-| `01_maior_queda_mensal.sql` | Top 3 moinhos com maior queda percentual mês a mês (últimos 6 meses) |
-| `02_anomalias_media_movel.sql` | Dias que ultrapassam 2 desvios-padrão da média móvel de 7 dias |
-| `03_integridade_referencial_fornecedores.sql` | Eventos SAP com fornecedor inexistente, agrupados por mês |
+| [01_maior_queda_mensal.sql](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/01_maior_queda_mensal.sql) | Top 3 moinhos com maior queda percentual mês a mês (últimos 6 meses) |
+| [02_anomalias_media_movel.sql](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/02_anomalias_media_movel.sql) | Dias que ultrapassam 2 desvios-padrão da média móvel de 7 dias |
+| [03_integridade_referencial_fornecedores.sql](https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/03_integridade_referencial_fornecedores.sql) | Eventos SAP com fornecedor inexistente, agrupados por mês |
 
 ## Premissas e mapeamento de nomes
 
@@ -625,9 +623,6 @@ Cada caso tem um resultado esperado conhecido, o que transforma a execução em 
 
 ---
 
-
-   <a href="https://github.com/RaphaelVelloso/desafio_tecnico/blob/main/src/parte-3/silver.eventos_sap.sql" target="_blank">Codigo SQL para os 3 topicos</a>
-
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
 
 ---
@@ -637,7 +632,7 @@ Cada caso tem um resultado esperado conhecido, o que transforma a execução em 
    Ao investigar uma degradação severa sem alteração de código, a investigação deve ir do nível macro (infra/recursos) para o nível micro (execução de DAG/código)
 
 
-## 0. Enquadramento: o que pode mudar quando "o código não mudou"
+## 1. Enquadramento: o que pode mudar quando "o código não mudou"
 
 Sem mudança de código, só três coisas podem ter mudado. Isso organiza toda a investigação:
 
@@ -651,7 +646,7 @@ Sem mudança de código, só três coisas podem ter mudado. Isso organiza toda a
 
 ---
 
-## 1. Diagnóstico: passos em ordem
+## 2. Diagnóstico: passos em ordem
 
 A ordem vai do **barato e amplo** ao **caro e específico**: cada passo descarta hipóteses e diz onde olhar no seguinte.
 
@@ -687,7 +682,7 @@ flowchart TD
 
 ---
 
-## 2. Hipóteses mais prováveis (em ordem)
+## 3. Hipóteses mais prováveis (em ordem)
 
 ### H1 — O broadcast join deixou de funcionar como antes porque a dimensão cresceu
 
@@ -761,9 +756,9 @@ Se o pipeline fosse Structured Streaming, um `dropDuplicates` sem watermark mant
 
 ---
 
-## 3. Otimizações concretas
+## 4. Otimizações concretas
 
-### 3.1 Reduzir a dimensão antes do join (H1, H4)
+### 4.1 Reduzir a dimensão antes do join (H1, H4)
 
 Antes de qualquer configuração, **diminuir o que é enviado no broadcast**: só a versão corrente, só as colunas necessárias, sem duplicidade de chave. Isso costuma devolver a tabela ao tamanho de broadcast e ainda elimina o fan-out.
 
@@ -782,7 +777,7 @@ resultado = sensores.join(F.broadcast(dim_atual), "fornecedor_id", "left")
 - Se o negócio precisar da versão **vigente na data da leitura** (join temporal), use `valid_from <= ts < valid_to`. Em joins por intervalo, considere a dica `RANGE_JOIN` do Databricks.
 - Atualize as estatísticas para que o otimizador decida com dados reais: `ANALYZE TABLE prod_financeiro.silver.dim_fornecedores COMPUTE STATISTICS`.
 
-### 3.2 Revisar a estratégia de join e o *threshold* de broadcast (H1)
+### 4.2 Revisar a estratégia de join e o *threshold* de broadcast (H1)
 
 - **Não aumentar o limite às cegas.** Broadcast custa memória no driver **e** em cada executor. Meça o tamanho real (`BroadcastExchange`, aba SQL) e só então ajuste, com folga em relação à memória disponível.
 - Se a dimensão reduzida continuar grande, **remova o `broadcast()` explícito** e deixe o AQE decidir com estatísticas de runtime (ele pode converter um `SortMergeJoin` em broadcast quando o lado real for pequeno).
@@ -793,7 +788,7 @@ resultado = sensores.join(F.broadcast(dim_atual), "fornecedor_id", "left")
 spark.conf.set("spark.sql.autoBroadcastJoinThreshold", 100 * 1024 * 1024)
 ```
 
-### 3.3 Tratar data skew (H2)
+### 4.3 Tratar data skew (H2)
 
 1. **Identificar as chaves quentes** (consulta da seção 2, H2).
 2. **AQE `skewJoin`:** divide automaticamente partições enormes **em joins**. Ele **não** resolve skew de `groupBy` nem de `dropDuplicates`.
@@ -815,7 +810,7 @@ final = (
 4. **Chaves quentes em separado:** processar as poucas chaves dominantes por um caminho próprio (com broadcast) e o restante pelo caminho normal, unindo os resultados.
 5. **Atacar a origem:** um sensor com defeito enviando milhões de leituras deve ser detectado e limitado antes (regra de qualidade/quarentena), em vez de sobrecarregar o pipeline.
 
-### 3.4 AQE: verificar, ajustar e corrigir o que é comum errar
+### 4.4 AQE: verificar, ajustar e corrigir o que é comum errar
 
 O AQE já vem **ligado por padrão** no Databricks e nas versões recentes do Spark, então o passo é **verificar** a configuração e **ajustar** o que faz diferença. Os nomes corretos:
 
@@ -830,20 +825,20 @@ O AQE já vem **ligado por padrão** no Databricks e nas versões recentes do Sp
 
 Não existe `spark.sql.adaptive.autoBroadcastJoinThreshold.enabled`: é comum encontrar essa "configuração" em textos gerados por IA. Habilitar configurações que já são o padrão não é uma otimização; o ganho vem de **medir e ajustar** os limiares.
 
-### 3.5 Particionamento, leitura e formato (H3)
+### 4.5 Particionamento, leitura e formato (H3)
 
 - **Partições de shuffle:** com volume maior, comece com um número maior e deixe o AQE reduzir; no Databricks, considere o shuffle auto-otimizado (`spark.sql.shuffle.partitions = auto`, conferindo o suporte no seu Runtime).
 - **Schema explícito no JSON**, ou Auto Loader com `schemaLocation`, para eliminar a passagem extra de inferência.
 - **Converter o JSON bruto em Delta** (Bronze, Partes 1 e 2): formato colunar, estatísticas e *data skipping*, e arquivos compactados por `OPTIMIZE`, com Liquid Clustering pela chave de consulta. Evite `multiLine` quando o formato permitir uma linha por registro.
 - **Paralelismo de leitura:** `spark.sql.files.maxPartitionBytes` (padrão 128 MB) controla o tamanho das partições de entrada.
 
-### 3.6 Caching (com critério)
+### 4.6 Caching (com critério)
 
 - **Vale** persistir a dimensão reduzida, ou um intermediário **pequeno** reutilizado várias vezes no mesmo job (`persist(StorageLevel.MEMORY_AND_DISK)` e `unpersist()` no final).
 - **Não vale** cachear a tabela grande de sensores: consome memória, provoca *spill* e só ajuda se for lida várias vezes.
 - Para leituras repetidas de tabelas Delta, o cache de disco do Databricks (em instâncias com SSD local) costuma ser preferível ao `cache()` do Spark.
 
-### 3.7 Cluster e autoscaling (H5)
+### 4.7 Cluster e autoscaling (H5)
 
 - Um job com SLA previsível é melhor em um **cluster de job dedicado**, sem concorrência.
 - Se o job for lento nos primeiros minutos por causa do autoscaling, aumente o mínimo de workers (a diferença de custo costuma ser menor que o ganho de tempo).
@@ -852,13 +847,13 @@ Não existe `spark.sql.adaptive.autoBroadcastJoinThreshold.enabled`: é comum en
 
 ---
 
-## 4. Correção estrutural: tornar o job incremental
+## 5. Correção estrutural: tornar o job incremental
 
 A causa de fundo de "o job piora sempre que os dados crescem" é que ele **reprocessa todo o histórico** a cada execução. Um pipeline **incremental** (Bronze com Auto Loader e Silver com `foreachBatch` + MERGE, como na Parte 2) processa apenas os dados novos, e a duração passa a depender do volume **novo**, não do acumulado. As otimizações acima recuperam a performance; o incremental impede que o problema volte.
 
 ---
 
-## 5. Como validar a melhoria e evitar recorrência
+## 6. Como validar a melhoria e evitar recorrência
 
 **Comparação antes/depois (mesma entrada):**
 
@@ -1012,7 +1007,7 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 | :-- | :-- |
 | [Use liquid clustering for tables](https://docs.databricks.com/aws/en/delta/clustering) | Escolha de Liquid Clustering no lugar de partição e `ZORDER`. A documentação informa que o clustering **não é compatível** com particionamento nem com `ZORDER` na mesma tabela e que as chaves podem ser redefinidas sem reescrever os dados. |
 | [Predictive optimization](https://docs.databricks.com/aws/optimizations/predictive-optimization) | Manutenção automática (`OPTIMIZE`, `VACUUM`, `ANALYZE`) de tabelas gerenciadas do Unity Catalog. A disponibilidade depende da conta, do plano e da região. |
-| [Optimize data file layout](https://docs.databricks.com/aws/en/tables/operations/optimize) **(lista original)** | Compactação e agrupamento por chaves de clustering. Leitores usam isolamento por snapshot enquanto o `OPTIMIZE` roda. |
+| [Optimize data file layout](https://docs.databricks.com/aws/en/tables/operations/optimize)  | Compactação e agrupamento por chaves de clustering. Leitores usam isolamento por snapshot enquanto o `OPTIMIZE` roda. |
 | [Configure schema inference and evolution in Auto Loader](https://docs.databricks.com/en/ingestion/auto-loader/schema.html) | Tratamento da mudança `planta_id` → `id_planta`: no modo `addNewColumns` o stream falha uma vez ao detectar a coluna nova (`UnknownFieldException`) e reinicia com o schema evoluído, por isso o Job precisa de retry. Com schema fornecido, o padrão passa a ser `none` (a coluna nova é ignorada). |
 | [Work with table history](https://docs.databricks.com/aws/en/tables/history) | Rollback e time travel no reprocessamento. O histórico tem retenção de 30 dias por padrão, mas a documentação recomenda confiar em time travel apenas nos últimos 7 dias, a menos que retenção de dados e de log sejam ampliadas. |
 | [Isolation levels and write conflicts](https://docs.databricks.com/aws/en/optimizations/isolation/row-level-concurrency) | Isolamento por snapshot para os leitores durante o reprocessamento, e os conflitos de escrita esperados (`ConcurrentAppendException`) entre `MERGE` e appends. |
@@ -1051,9 +1046,9 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 
 | Referência | O que sustenta na entrega |
 | :-- | :-- |
-| [Spark SQL — Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html) **(lista original)** | Dicas de estratégia de join, cache e AQE; configurações `spark.sql.adaptive.*`. Valores padrão citados no texto: `skewedPartitionFactor` 5.0, `skewedPartitionThresholdInBytes` 256 MB; `spark.sql.adaptive.autoBroadcastJoinThreshold` existe desde o Spark 3.2 e, sem definição, usa o valor de `spark.sql.autoBroadcastJoinThreshold`; o `skewJoin` do AQE trata *skew* em joins (sort-merge e shuffled hash). |
-| [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html) **(lista original)** | Memória, serialização e paralelismo. |
-| [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe) **(lista original)** | Comportamento do AQE no Databricks (coalescência de partições, troca de estratégia de join, skew join). |
+| [Spark SQL — Performance Tuning](https://spark.apache.org/docs/latest/sql-performance-tuning.html)  | Dicas de estratégia de join, cache e AQE; configurações `spark.sql.adaptive.*`. Valores padrão citados no texto: `skewedPartitionFactor` 5.0, `skewedPartitionThresholdInBytes` 256 MB; `spark.sql.adaptive.autoBroadcastJoinThreshold` existe desde o Spark 3.2 e, sem definição, usa o valor de `spark.sql.autoBroadcastJoinThreshold`; o `skewJoin` do AQE trata *skew* em joins (sort-merge e shuffled hash). |
+| [Tuning Spark](https://spark.apache.org/docs/latest/tuning.html)  | Memória, serialização e paralelismo. |
+| [Adaptive query execution](https://docs.databricks.com/aws/en/optimizations/aqe)  | Comportamento do AQE no Databricks (coalescência de partições, troca de estratégia de join, skew join). |
 | [Spark Web UI](https://spark.apache.org/docs/latest/web-ui.html) | Leitura das abas Jobs, Stages, Executors e SQL no diagnóstico (métricas de tasks, *spill*, GC, plano de execução). |
 | [Optimize data file layout](https://docs.databricks.com/aws/en/tables/operations/optimize) e [Predictive optimization](https://docs.databricks.com/aws/optimizations/predictive-optimization) | Layout de arquivos e estatísticas (`ANALYZE`) que alimentam as decisões do otimizador. |
 
@@ -1074,26 +1069,26 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 
 | Referência | O que sustenta na entrega |
 | :-- | :-- |
-| [Azure Key Vault — visão geral](https://learn.microsoft.com/en-us/azure/key-vault/general/overview) **(lista original)** | Cofre de segredos para credenciais do SFTP/API. |
-| [Managed identities para recursos do Azure](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview) **(lista original)** | Autenticação sem credenciais estáticas. |
+| [Azure Key Vault — visão geral](https://learn.microsoft.com/en-us/azure/key-vault/general/overview)  | Cofre de segredos para credenciais do SFTP/API. |
+| [Managed identities para recursos do Azure](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)  | Autenticação sem credenciais estáticas. |
 | [Secret management no Azure Databricks](https://learn.microsoft.com/azure/databricks/security/secrets) | Secret scope **respaldado por Key Vault** (interface somente leitura para o cofre), com escopos alinhados a papéis ou aplicações. |
-| [Conector SFTP do Azure Data Factory](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory) **(lista original)** | Cópia do arquivo do SFTP externo para o data lake. |
-| [Event Grid — schema de eventos do Blob Storage](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema) **(lista original)** | Eventos de criação de blob após o pouso do arquivo. |
-| [Azure Monitor — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview) e [Alertas — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview) **(lista original)** | Observabilidade e alertas de falha e atraso. |
+| [Conector SFTP do Azure Data Factory](https://learn.microsoft.com/en-us/azure/data-factory/connector-sftp?tabs=data-factory)  | Cópia do arquivo do SFTP externo para o data lake. |
+| [Event Grid — schema de eventos do Blob Storage](https://learn.microsoft.com/en-us/azure/event-grid/event-schema-blob-storage?tabs=cloud-event-schema)  | Eventos de criação de blob após o pouso do arquivo. |
+| [Azure Monitor — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/fundamentals/overview) e [Alertas — visão geral](https://learn.microsoft.com/en-us/azure/azure-monitor/alerts/alerts-overview)  | Observabilidade e alertas de falha e atraso. |
 
 **AWS**
 
 | Referência | O que sustenta na entrega |
 | :-- | :-- |
-| [IAM roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html) **(lista original)** | Credenciais temporárias por função em vez de chaves estáticas. Para *menor privilégio*, cite também a página de boas práticas do IAM. |
-| [O que é o Amazon EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html) **(lista original)** | Regras agendadas e orientadas a eventos para detecção de atraso. |
+| [IAM roles](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html)| Credenciais temporárias por função em vez de chaves estáticas. Para *menor privilégio*, cite também a página de boas práticas do IAM. |
+| [O que é o Amazon EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html)| Regras agendadas e orientadas a eventos para detecção de atraso. |
 
 ---
 
 ## Documentação de apoio (visão geral)
 
-- [Delta Lake no Databricks](https://docs.databricks.com/aws/en/delta) **(lista original)**
-- [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader) **(lista original)**
+- [Delta Lake no Databricks](https://docs.databricks.com/aws/en/delta)
+- [Auto Loader](https://docs.databricks.com/aws/en/ingestion/cloud-object-storage/auto-loader)
 
 
 <small><a href="#indice">⬆️ Voltar ao topo</a></small>
