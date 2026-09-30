@@ -1056,8 +1056,6 @@ Também entendi que prompts mais precisos ajudam a reduzir ambiguidades, mas nã
 
 ## Parte 5 — Integração e nuvem
 
-> **Mantenha apenas a nuvem escolhida.** O enunciado pede AWS **ou** Azure. Esta seção lista as duas para você remover a que não usar.
-
 **Comum (Databricks)**
 
 | Referência | O que sustenta na entrega |
